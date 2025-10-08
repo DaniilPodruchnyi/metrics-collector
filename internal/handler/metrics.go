@@ -23,8 +23,8 @@ func New(metricService service.MetricService) *Handlers {
 func (h *Handlers) UpdateMetrics(w http.ResponseWriter, r *http.Request) {
 	// Валидируем тип метода
 	if r.Method != http.MethodPost {
-		w.Write([]byte(fmt.Sprintf("Method %s not allowed", r.Method)))
 		w.WriteHeader(http.StatusMethodNotAllowed)
+		w.Write([]byte(fmt.Sprintf("Method %s not allowed", r.Method)))
 		return
 	}
 
@@ -36,8 +36,8 @@ func (h *Handlers) UpdateMetrics(w http.ResponseWriter, r *http.Request) {
 	// Вызываем сервис по работе с метриками
 	err := h.metricService.UpdateMetrics(metricType, metricName, metricValue)
 	if err != nil {
-		w.Write([]byte(err.Error()))
 		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(err.Error()))
 		return
 	}
 

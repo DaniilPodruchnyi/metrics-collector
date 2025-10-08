@@ -62,14 +62,14 @@ func (r *MemStorage) updateCounter(name, value string) error {
 	}
 
 	// Выводим все метрики
-	for k, v := range r.data {
-		if v.Delta != nil {
-			fmt.Printf("k: %s | vDELTA: %d\n", k, *v.Delta)
-		}
-		if v.Value != nil {
-			fmt.Printf("k: %s | vValue: %f\n", k, *v.Value)
-		}
-	}
+	// for k, v := range r.data {
+	// 	if v.Delta != nil {
+	// 		fmt.Printf("k: %s | vDELTA: %d\n", k, *v.Delta)
+	// 	}
+	// 	if v.Value != nil {
+	// 		fmt.Printf("k: %s | vValue: %f\n", k, *v.Value)
+	// 	}
+	// }
 
 	return nil
 }
@@ -101,14 +101,14 @@ func (r *MemStorage) updateGauge(name, value string) error {
 	}
 
 	// Выводим все метрики
-	for k, v := range r.data {
-		if v.Delta != nil {
-			fmt.Printf("k: %s | vDELTA: %d\n", k, *v.Delta)
-		}
-		if v.Value != nil {
-			fmt.Printf("k: %s | vValue: %f\n", k, *v.Value)
-		}
-	}
+	// for k, v := range r.data {
+	// 	if v.Delta != nil {
+	// 		fmt.Printf("k: %s | vDELTA: %d\n", k, *v.Delta)
+	// 	}
+	// 	if v.Value != nil {
+	// 		fmt.Printf("k: %s | vValue: %f\n", k, *v.Value)
+	// 	}
+	// }
 
 	return nil
 }
