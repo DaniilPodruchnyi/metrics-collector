@@ -59,9 +59,6 @@ func New(cfg *config.AgentConfig) *Agent {
 
 // Run запускает основной цикл агента
 func (a *Agent) Run() {
-	// Инициализируем генератор случайных чисел
-	rand.Seed(time.Now().UnixNano())
-
 	pollTicker := time.NewTicker(a.config.PollInterval)
 	reportTicker := time.NewTicker(a.config.ReportInterval)
 	defer pollTicker.Stop()
