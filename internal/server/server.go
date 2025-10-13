@@ -7,6 +7,8 @@ import (
 	"github.com/DaniilPodruchnyi/metrics-collector/internal/handler"
 	"github.com/DaniilPodruchnyi/metrics-collector/internal/repository"
 	"github.com/DaniilPodruchnyi/metrics-collector/internal/service"
+	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
 )
 
 // Структура сервера по работе с метриками
@@ -41,43 +43,21 @@ func (s *Server) Stop() {
 }
 
 // Метод для настройки роутера сервера
-func (s *Server) setupRoutes() *http.ServeMux {
-	mux := http.NewServeMux()
+func (s *Server) setupRoutes() chi.Router {
+	// Используем роутер chi
+	r := chi.NewRouter()
 
-	// Основные роуты с точными паттернами
-	mux.HandleFunc("POST /update/{type}/{name}/{value}", s.handlers.UpdateMetrics)
-	mux.HandleFunc("GET /value/{name}", s.handlers.GetMetric)
-	mux.HandleFunc("GET /{$}", s.handlers.GetAllMetrics) // Только корень
+	// Добавляем стандартные middleware
+	r.Use(middleware.Logger)
+	r.Use(middleware.Recoverer)
+	r.Use(middleware.RequestID)
 
-	// Обработчики для неполных путей - возвращают 404
-	mux.HandleFunc("/update/{type}/{name}/", s.handle404) // /update/counter/name/
-	mux.HandleFunc("/update/{type}/", s.handle404)        // /update/counter/
-	mux.HandleFunc("/update/", s.handle404)               // /update/
-	mux.HandleFunc("/value/", s.handle404)                // /value/
+	// Маршруты для обновления метрик
+	r.Post("/update/{type}/{name}/{value}", s.handlers.UpdateMetrics)
 
-	// для всех остальных путей - возвращает 404
-	mux.HandleFunc("/", s.handleCatchAll)
+	// Маршруты для получения метрик
+	r.Get("/value/{type}/{name}", s.handlers.GetMetricValue)
+	r.Get("/", s.handlers.GetAllMetricsHTML)
 
-	return mux
-}
-
-// handle404 отправляет 404 ответ для неполных путей
-func (s *Server) handle404(w http.ResponseWriter, r *http.Request) {
-	http.NotFound(w, r)
-}
-
-// handleCatchAll обрабатывает все остальные пути
-func (s *Server) handleCatchAll(w http.ResponseWriter, r *http.Request) {
-	// Если это не корневой путь, возвращаем 404
-	if r.URL.Path != "/" {
-		http.NotFound(w, r)
-		return
-	}
-
-	// Для корневого пути вызываем GetAllMetrics только для GET запросов
-	if r.Method == http.MethodGet {
-		s.handlers.GetAllMetrics(w, r)
-	} else {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-	}
+	return r
 }
