@@ -12,18 +12,18 @@ import (
 // Структура сервера по работе с метриками
 type Server struct {
 	service  *service.MetricService
-	handlers *handler.Handlers
+	handlers *handler.MetricHandler
 }
 
 // Функция для инициализации сервера
 func New() *Server {
 	metricsRepository := repository.New()
-	metricService := service.New(*metricsRepository)
-	handler := handler.New(*metricService)
+	metricService := service.New(metricsRepository)
+	metricHandler := handler.New(metricService)
 
 	return &Server{
 		service:  metricService,
-		handlers: handler,
+		handlers: metricHandler,
 	}
 }
 
@@ -31,11 +31,11 @@ func New() *Server {
 func (s *Server) Start() error {
 	router := s.setupRoutes()
 
-	log.Println("Server listinig on :8080")
+	log.Println("Server listening on :8080")
 	return http.ListenAndServe(":8080", router)
 }
 
-// Mock-метод для  остановки сервера
+// Mock-метод для остановки сервера
 func (s *Server) Stop() {
 	log.Println("Server is stopped")
 }
@@ -44,7 +44,9 @@ func (s *Server) Stop() {
 func (s *Server) setupRoutes() *http.ServeMux {
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("/update/{type}/{name}/{value}", s.handlers.UpdateMetrics)
+	mux.HandleFunc("POST /update/{type}/{name}/{value}", s.handlers.UpdateMetrics)
+	mux.HandleFunc("GET /value/{name}", s.handlers.GetMetric)
+	mux.HandleFunc("GET /", s.handlers.GetAllMetrics)
 
 	return mux
 }
