@@ -13,17 +13,19 @@ import (
 
 // Структура сервера по работе с метриками
 type Server struct {
+	address  string
 	service  *service.MetricService
 	handlers *handler.MetricHandler
 }
 
 // Функция для инициализации сервера
-func New() *Server {
+func New(address string) *Server {
 	metricsRepository := repository.New()
 	metricService := service.New(metricsRepository)
 	metricHandler := handler.New(metricService)
 
 	return &Server{
+		address:  address,
 		service:  metricService,
 		handlers: metricHandler,
 	}
@@ -33,8 +35,8 @@ func New() *Server {
 func (s *Server) Start() error {
 	router := s.setupRoutes()
 
-	log.Println("Server listening on :8080")
-	return http.ListenAndServe(":8080", router)
+	log.Printf("Server listening on %s", s.address)
+	return http.ListenAndServe(s.address, router)
 }
 
 // Mock-метод для остановки сервера
