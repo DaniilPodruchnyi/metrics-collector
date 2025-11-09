@@ -2,6 +2,9 @@ package main
 
 import (
 	"log"
+	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/DaniilPodruchnyi/metrics-collector/internal/config"
 	"github.com/DaniilPodruchnyi/metrics-collector/internal/server"
@@ -18,7 +21,18 @@ func main() {
 	cfg.LogConfig()
 
 	// Инициализация сервера
-	srv := server.New(cfg.Address)
+	srv := server.New(cfg)
+
+	// Обработка graceful shutdown
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+
+	go func() {
+		<-sigChan
+		log.Println("Received shutdown signal")
+		srv.Stop()
+		os.Exit(0)
+	}()
 
 	log.Printf("Server starting on %s", cfg.Address)
 
