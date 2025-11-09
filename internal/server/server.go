@@ -5,10 +5,12 @@ import (
 	"net/http"
 
 	"github.com/DaniilPodruchnyi/metrics-collector/internal/handler"
+	custommiddleware "github.com/DaniilPodruchnyi/metrics-collector/internal/middleware"
 	"github.com/DaniilPodruchnyi/metrics-collector/internal/repository"
 	"github.com/DaniilPodruchnyi/metrics-collector/internal/service"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"go.uber.org/zap"
 )
 
 // Структура сервера по работе с метриками
@@ -48,11 +50,16 @@ func (s *Server) Stop() {
 func (s *Server) setupRoutes() chi.Router {
 	// Используем роутер chi
 	r := chi.NewRouter()
+	// Мой кастомный логгер
+	logger, _ := zap.NewProduction()
 
 	// Добавляем стандартные middleware
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.RequestID)
+
+	// Подключаем zap-логирование
+	r.Use(custommiddleware.ZapLoggerMiddleware(logger))
 
 	// Маршруты для обновления метрик
 	r.Post("/update/{type}/{name}/{value}", s.handlers.UpdateMetrics)
