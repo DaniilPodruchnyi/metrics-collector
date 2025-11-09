@@ -54,6 +54,7 @@ func (s *Server) setupRoutes() chi.Router {
 	logger, _ := zap.NewProduction()
 
 	// Добавляем стандартные middleware
+	r.Use(middleware.StripSlashes)
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.RequestID)
@@ -61,15 +62,15 @@ func (s *Server) setupRoutes() chi.Router {
 	// Подключаем zap-логирование
 	r.Use(custommiddleware.ZapLoggerMiddleware(logger))
 
+	r.Post("/update", s.handlers.UpdateMetricsJSON)
+	r.Post("/value", s.handlers.GetMetricJSON)
+
 	// Маршруты для обновления метрик
 	r.Post("/update/{type}/{name}/{value}", s.handlers.UpdateMetrics)
 
 	// Маршруты для получения метрик
 	r.Get("/value/{type}/{name}", s.handlers.GetMetricValue)
 	r.Get("/", s.handlers.GetAllMetricsHTML)
-
-	r.Post("/update", s.handlers.UpdateMetricsJSON)
-	r.Post("/value", s.handlers.GetMetricJSON)
 
 	return r
 }
