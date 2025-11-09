@@ -2,8 +2,10 @@ package agent
 
 import (
 	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"math/rand"
 	"net/http"
@@ -12,6 +14,7 @@ import (
 	"time"
 
 	"github.com/DaniilPodruchnyi/metrics-collector/internal/config"
+	"github.com/DaniilPodruchnyi/metrics-collector/internal/model"
 )
 
 // Список gauge-метрик из runtime
@@ -225,4 +228,60 @@ func (a *Agent) GetMetric(name string) (*MetricValue, bool) {
 		Gauge:   metric.Gauge,
 		Counter: metric.Counter,
 	}, true
+}
+
+// SendMetricJSON отправляет метрику на сервер в формате JSON с gzip сжатием
+func SendMetricJSON(serverURL string, metric model.Metrics) error {
+	// Сериализуем метрику в JSON
+	data, err := json.Marshal(metric)
+	if err != nil {
+		return fmt.Errorf("failed to marshal metric: %w", err)
+	}
+
+	// Сжимаем данные
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	if _, err := gz.Write(data); err != nil {
+		return fmt.Errorf("failed to compress data: %w", err)
+	}
+	if err := gz.Close(); err != nil {
+		return fmt.Errorf("failed to close gzip writer: %w", err)
+	}
+
+	// Создаем HTTP запрос
+	req, err := http.NewRequest(http.MethodPost, serverURL+"/update", &buf)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	// Устанавливаем заголовки
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Encoding", "gzip")
+	req.Header.Set("Accept-Encoding", "gzip")
+
+	// Отправляем запрос
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// Проверяем статус ответа
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("server returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	return nil
+}
+
+// SendMetricsJSONBatch отправляет несколько метрик за один запрос
+func SendMetricsJSONBatch(serverURL string, metrics []model.Metrics) error {
+	for _, metric := range metrics {
+		if err := SendMetricJSON(serverURL, metric); err != nil {
+			return err
+		}
+	}
+	return nil
 }

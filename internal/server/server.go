@@ -59,6 +59,9 @@ func (s *Server) setupRoutes() chi.Router {
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.RequestID)
 
+	// Добавляем gzip middleware
+	r.Use(custommiddleware.GzipMiddleware)
+
 	// Подключаем zap-логирование
 	r.Use(custommiddleware.ZapLoggerMiddleware(logger))
 
