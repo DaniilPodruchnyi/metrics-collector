@@ -155,9 +155,10 @@ func (a *Agent) sendMetric(name string, metric *MetricValue) error {
 	}
 	jsonMetric.ID = name
 	jsonMetric.MType = metric.Type
-	if metric.Type == "counter" {
+	switch metric.Type {
+	case "counter":
 		jsonMetric.Delta = &metric.Counter
-	} else if metric.Type == "gauge" {
+	case "gauge":
 		jsonMetric.Value = &metric.Gauge
 	}
 

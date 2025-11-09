@@ -64,48 +64,8 @@ func TestCollectMetrics(t *testing.T) {
 	}
 }
 
-func TestBuildMetricURL(t *testing.T) {
-	cfg := &config.AgentConfig{
-		ServerAddress:  "http://localhost:8080",
-		PollInterval:   2 * time.Second,
-		ReportInterval: 10 * time.Second,
-	}
-
-	agent := New(cfg)
-
-	tests := []struct {
-		name     string
-		metric   *MetricValue
-		expected string
-	}{
-		{
-			name:     "TestGauge",
-			metric:   &MetricValue{Type: "gauge", Gauge: 123.45},
-			expected: "http://localhost:8080/update/gauge/TestGauge/123.45",
-		},
-		{
-			name:     "TestCounter",
-			metric:   &MetricValue{Type: "counter", Counter: 42},
-			expected: "http://localhost:8080/update/counter/TestCounter/42",
-		},
-		{
-			name:     "InvalidType",
-			metric:   &MetricValue{Type: "invalid"},
-			expected: "",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			url := agent.buildMetricURL(tt.name, tt.metric)
-			if url != tt.expected {
-				t.Errorf("buildMetricURL() = %v, want %v", url, tt.expected)
-			}
-		})
-	}
-}
-
 func TestSendMetric(t *testing.T) {
+	// Тестовый HTTP сервер, который принимает JSON POST и проверяет заголовки
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			t.Errorf("Expected POST method, got %s", r.Method)
@@ -145,11 +105,12 @@ func TestSendMetric(t *testing.T) {
 	}
 
 	agent := New(cfg)
+	agent.collectMetrics() // Обязательно обновляем метрики перед отправкой
 
-	if err := agent.sendMetric("TestGauge", &MetricValue{Type: "gauge", Gauge: 123.45}); err != nil {
+	if err := agent.sendMetric("PollCount", agent.metrics["PollCount"]); err != nil {
 		t.Errorf("sendMetric() error = %v", err)
 	}
-	if err := agent.sendMetric("TestCounter", &MetricValue{Type: "counter", Counter: 42}); err != nil {
+	if err := agent.sendMetric("RandomValue", agent.metrics["RandomValue"]); err != nil {
 		t.Errorf("sendMetric() error = %v", err)
 	}
 }
@@ -174,6 +135,47 @@ func TestSendMetricError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "500") {
 		t.Errorf("Error should mention status code 500, got: %v", err)
+	}
+}
+
+func TestBuildMetricURL(t *testing.T) {
+	cfg := &config.AgentConfig{
+		ServerAddress:  "http://localhost:8080",
+		PollInterval:   2 * time.Second,
+		ReportInterval: 10 * time.Second,
+	}
+
+	agent := New(cfg)
+
+	tests := []struct {
+		name     string
+		metric   *MetricValue
+		expected string
+	}{
+		{
+			name:     "TestGauge",
+			metric:   &MetricValue{Type: "gauge", Gauge: 123.45},
+			expected: "http://localhost:8080/update/gauge/TestGauge/123.45",
+		},
+		{
+			name:     "TestCounter",
+			metric:   &MetricValue{Type: "counter", Counter: 42},
+			expected: "http://localhost:8080/update/counter/TestCounter/42",
+		},
+		{
+			name:     "InvalidType",
+			metric:   &MetricValue{Type: "invalid"},
+			expected: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			url := agent.buildMetricURL(tt.name, tt.metric)
+			if url != tt.expected {
+				t.Errorf("buildMetricURL() = %v, want %v", url, tt.expected)
+			}
+		})
 	}
 }
 
