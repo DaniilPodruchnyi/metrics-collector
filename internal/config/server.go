@@ -11,26 +11,17 @@ type ServerConfig struct {
 	Address string
 }
 
-// ParseServerConfig парсит флаги командной строки для сервера
 func ParseServerConfig() (*ServerConfig, error) {
-	config := &ServerConfig{}
-
-	// Определяем флаги с значениями по умолчанию
-	flag.StringVar(&config.Address, "a", "localhost:8080", "server address")
-
-	// Парсим флаги
+	const defaultAddr = "localhost:8080"
+	var addrFlag = flag.String("a", "", "server address")
 	flag.Parse()
 
-	// Проверяем, что нет неизвестных аргументов
-	if flag.NArg() > 0 {
-		return nil, fmt.Errorf("unknown arguments: %v", flag.Args())
-	}
+	address := getEnvOrFlagString("ADDRESS", *addrFlag, defaultAddr)
+	config := &ServerConfig{Address: address}
 
-	// Валидируем конфигурацию
 	if err := config.validate(); err != nil {
 		return nil, fmt.Errorf("validation failed: %w", err)
 	}
-
 	return config, nil
 }
 

@@ -4,6 +4,8 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -15,41 +17,61 @@ type AgentConfig struct {
 	ReportInterval time.Duration
 }
 
-// ParseAgentConfig парсит флаги командной строки для агента
 func ParseAgentConfig() (*AgentConfig, error) {
-	config := &AgentConfig{}
-
-	// Временные переменные для парсинга интервалов в секундах
-	var (
-		serverAddr     string
-		pollInterval   int
-		reportInterval int
+	// Значения по умолчанию
+	const (
+		defaultServerAddr = "localhost:8080"
+		defaultPoll       = 2
+		defaultReport     = 10
 	)
-
-	// Определяем флаги с значениями по умолчанию
-	flag.StringVar(&serverAddr, "a", "localhost:8080", "server address")
-	flag.IntVar(&pollInterval, "p", 2, "poll interval in seconds")
-	flag.IntVar(&reportInterval, "r", 10, "report interval in seconds")
-
-	// Парсим флаги
+	var (
+		serverAddrFlag = flag.String("a", "", "server address")
+		pollFlag       = flag.Int("p", defaultPoll, "poll interval in seconds")
+		reportFlag     = flag.Int("r", defaultReport, "report interval in seconds")
+	)
 	flag.Parse()
 
-	// Проверяем, что нет неизвестных аргументов
-	if flag.NArg() > 0 {
-		return nil, fmt.Errorf("unknown arguments: %v", flag.Args())
+	// 1. ADDRESS
+	serverAddr := getEnvOrFlagString("ADDRESS", *serverAddrFlag, defaultServerAddr)
+	// 2. POLL_INTERVAL
+	pollInterval := getEnvOrFlagInt("POLL_INTERVAL", *pollFlag, defaultPoll)
+	// 3. REPORT_INTERVAL
+	reportInterval := getEnvOrFlagInt("REPORT_INTERVAL", *reportFlag, defaultReport)
+
+	config := &AgentConfig{
+		ServerAddress:  normalizeServerAddress(serverAddr),
+		PollInterval:   time.Duration(pollInterval) * time.Second,
+		ReportInterval: time.Duration(reportInterval) * time.Second,
 	}
 
-	// Заполняем конфигурацию
-	config.ServerAddress = normalizeServerAddress(serverAddr)
-	config.PollInterval = time.Duration(pollInterval) * time.Second
-	config.ReportInterval = time.Duration(reportInterval) * time.Second
-
-	// Валидируем конфигурацию
 	if err := config.validate(); err != nil {
 		return nil, fmt.Errorf("validation failed: %w", err)
 	}
 
 	return config, nil
+}
+
+func getEnvOrFlagString(envKey string, flagVal string, defaultVal string) string {
+	if envVal := os.Getenv(envKey); envVal != "" {
+		return envVal
+	}
+	if flagVal != "" {
+		return flagVal
+	}
+	return defaultVal
+}
+
+func getEnvOrFlagInt(envKey string, flagVal int, defaultVal int) int {
+	if envVal := os.Getenv(envKey); envVal != "" {
+		if parsed, err := strconv.Atoi(envVal); err == nil {
+			return parsed
+		}
+	}
+	// если флаг не дефолт, то используем флаг (иначе - env, иначе дефолт)
+	if flagVal != defaultVal {
+		return flagVal
+	}
+	return defaultVal
 }
 
 // validate проверяет корректность конфигурации агента
