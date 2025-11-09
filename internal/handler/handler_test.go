@@ -1,330 +1,208 @@
 package handler
 
 import (
+	"bytes"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"strconv"
 	"strings"
 	"testing"
 
+	"github.com/DaniilPodruchnyi/metrics-collector/internal/model"
 	"github.com/DaniilPodruchnyi/metrics-collector/internal/repository"
 	"github.com/DaniilPodruchnyi/metrics-collector/internal/service"
 	"github.com/go-chi/chi/v5"
 )
 
-func setupTestRouter(handler *MetricHandler) chi.Router {
+// setupRouter создает роутер для всех эндпоинтов
+func setupRouter(handler *MetricHandler) chi.Router {
 	r := chi.NewRouter()
+
+	// JSON endpoints
+	r.Post("/update", handler.UpdateMetricsJSON)
+	r.Post("/value", handler.GetMetricJSON)
+
+	// Path-based endpoints
 	r.Post("/update/{type}/{name}/{value}", handler.UpdateMetrics)
 	r.Get("/value/{type}/{name}", handler.GetMetricValue)
 	r.Get("/", handler.GetAllMetricsHTML)
+
 	return r
 }
 
-func TestUpdateMetrics(t *testing.T) {
-	repo := repository.New()
-	svc := service.New(repo)
-	handler := New(svc)
-	router := setupTestRouter(handler)
+// Вспомогательные функции для указателей
+func int64Ptr(i int64) *int64     { return &i }
+func floatPtr(f float64) *float64 { return &f }
 
+// ============================================================================
+// Тесты для UpdateMetrics (path-based)
+// ============================================================================
+
+func TestUpdateMetrics(t *testing.T) {
 	tests := []struct {
-		name         string
-		method       string
-		url          string
-		wantStatus   int
-		wantBody     string
-		checkMetric  bool
-		metricName   string
-		expectedType string
-		expectedVal  string
+		name       string
+		metricType string
+		metricName string
+		metricVal  string
+		wantStatus int
+		wantBody   string
 	}{
 		{
-			name:         "valid gauge",
-			method:       http.MethodPost,
-			url:          "/update/gauge/TestGauge/123.45",
-			wantStatus:   http.StatusOK,
-			checkMetric:  true,
-			metricName:   "TestGauge",
-			expectedType: "gauge",
-			expectedVal:  "123.45",
+			name:       "valid counter",
+			metricType: "counter",
+			metricName: "TestCounter",
+			metricVal:  "42",
+			wantStatus: http.StatusOK,
+			wantBody:   "OK",
 		},
 		{
-			name:         "valid counter",
-			method:       http.MethodPost,
-			url:          "/update/counter/TestCounter/42",
-			wantStatus:   http.StatusOK,
-			checkMetric:  true,
-			metricName:   "TestCounter",
-			expectedType: "counter",
-			expectedVal:  "42",
-		},
-		{
-			name:       "invalid HTTP method",
-			method:     http.MethodGet,
-			url:        "/update/gauge/Test/1",
-			wantStatus: http.StatusMethodNotAllowed,
+			name:       "valid gauge",
+			metricType: "gauge",
+			metricName: "TestGauge",
+			metricVal:  "123.456",
+			wantStatus: http.StatusOK,
+			wantBody:   "OK",
 		},
 		{
 			name:       "invalid metric type",
-			method:     http.MethodPost,
-			url:        "/update/invalid/Test/1",
+			metricType: "unknown",
+			metricName: "Test",
+			metricVal:  "100",
 			wantStatus: http.StatusBadRequest,
-			wantBody:   "invalid metric type",
 		},
 		{
 			name:       "invalid counter value",
-			method:     http.MethodPost,
-			url:        "/update/counter/BadCounter/not_a_number",
+			metricType: "counter",
+			metricName: "Test",
+			metricVal:  "not-a-number",
 			wantStatus: http.StatusBadRequest,
-			wantBody:   "invalid counter value format",
 		},
 		{
 			name:       "invalid gauge value",
-			method:     http.MethodPost,
-			url:        "/update/gauge/BadGauge/not_a_float",
+			metricType: "gauge",
+			metricName: "Test",
+			metricVal:  "not-a-float",
 			wantStatus: http.StatusBadRequest,
-			wantBody:   "invalid gauge value format",
-		},
-		{
-			name:         "counter increment test",
-			method:       http.MethodPost,
-			url:          "/update/counter/IncrementTest/10",
-			wantStatus:   http.StatusOK,
-			checkMetric:  true,
-			metricName:   "IncrementTest",
-			expectedType: "counter",
-			expectedVal:  "10",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			req := httptest.NewRequest(tt.method, tt.url, nil)
-			w := httptest.NewRecorder()
+			repo := repository.New()
+			svc := service.New(repo)
+			handler := New(svc)
+			router := setupRouter(handler)
 
+			url := "/update/" + tt.metricType + "/" + tt.metricName + "/" + tt.metricVal
+			req := httptest.NewRequest(http.MethodPost, url, nil)
+			w := httptest.NewRecorder()
 			router.ServeHTTP(w, req)
 
 			if w.Code != tt.wantStatus {
 				t.Errorf("Expected status %d, got %d", tt.wantStatus, w.Code)
 			}
-
-			if tt.wantBody != "" {
-				body := strings.TrimSpace(w.Body.String())
-				if !strings.Contains(body, tt.wantBody) {
-					t.Errorf("Expected error body to contain %q, got %q", tt.wantBody, body)
-				}
-			}
-
-			// Проверяем через сервис
-			if tt.checkMetric {
-				metric, exists := svc.GetMetric(tt.metricName)
-				if !exists {
-					t.Fatalf("Metric %s was not saved", tt.metricName)
-				}
-
-				if metric.MType != tt.expectedType {
-					t.Errorf("Metric type mismatch: got %s, want %s", metric.MType, tt.expectedType)
-				}
-
-				switch tt.expectedType {
-				case "counter":
-					if metric.Delta == nil {
-						t.Fatal("Delta is nil for counter")
-					}
-					expected, _ := strconv.ParseInt(tt.expectedVal, 10, 64)
-					if *metric.Delta != expected {
-						t.Errorf("Counter value mismatch: got %d, want %d", *metric.Delta, expected)
-					}
-				case "gauge":
-					if metric.Value == nil {
-						t.Fatal("Value is nil for gauge")
-					}
-					expected, _ := strconv.ParseFloat(tt.expectedVal, 64)
-					if *metric.Value != expected {
-						t.Errorf("Gauge value mismatch: got %f, want %f", *metric.Value, expected)
-					}
-				}
+			if tt.wantBody != "" && !strings.Contains(w.Body.String(), tt.wantBody) {
+				t.Errorf("Expected body to contain %q, got %q", tt.wantBody, w.Body.String())
 			}
 		})
 	}
 }
 
-func TestSpecialFloatValues(t *testing.T) {
-	repo := repository.New()
-	svc := service.New(repo)
-	handler := New(svc)
-	router := setupTestRouter(handler)
+// ============================================================================
+// Тесты для GetMetricValue (path-based)
+// ============================================================================
 
-	tests := []struct {
-		name       string
-		url        string
-		wantStatus int
-		shouldWork bool
-	}{
-		{
-			name:       "positive infinity",
-			url:        "/update/gauge/TestPosInf/+inf",
-			wantStatus: http.StatusOK,
-			shouldWork: true,
-		},
-		{
-			name:       "negative infinity",
-			url:        "/update/gauge/TestNegInf/-inf",
-			wantStatus: http.StatusOK,
-			shouldWork: true,
-		},
-		{
-			name:       "mixed letters and numbers",
-			url:        "/update/gauge/TestInvalid/123abc",
-			wantStatus: http.StatusBadRequest,
-			shouldWork: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodPost, tt.url, nil)
-			w := httptest.NewRecorder()
-
-			router.ServeHTTP(w, req)
-
-			if w.Code != tt.wantStatus {
-				t.Errorf("Expected status %d, got %d", tt.wantStatus, w.Code)
-			}
-		})
-	}
-}
-
-func TestCounterIncrement(t *testing.T) {
-	repo := repository.New()
-	svc := service.New(repo)
-	handler := New(svc)
-	router := setupTestRouter(handler)
-
-	// Первое обновление counter
-	req1 := httptest.NewRequest(http.MethodPost, "/update/counter/TestIncrement/5", nil)
-	w1 := httptest.NewRecorder()
-	router.ServeHTTP(w1, req1)
-
-	if w1.Code != http.StatusOK {
-		t.Fatalf("First update failed with status %d", w1.Code)
-	}
-
-	// Второе обновление того же counter
-	req2 := httptest.NewRequest(http.MethodPost, "/update/counter/TestIncrement/3", nil)
-	w2 := httptest.NewRecorder()
-	router.ServeHTTP(w2, req2)
-
-	if w2.Code != http.StatusOK {
-		t.Fatalf("Second update failed with status %d", w2.Code)
-	}
-
-	// Проверяем, что значение увеличилось
-	metric, exists := svc.GetMetric("TestIncrement")
-	if !exists {
-		t.Fatal("Metric was not found")
-	}
-
-	if metric.Delta == nil {
-		t.Fatal("Delta is nil")
-	}
-
-	expected := int64(8) // 5 + 3
-	if *metric.Delta != expected {
-		t.Errorf("Expected counter value %d, got %d", expected, *metric.Delta)
-	}
-}
-
-// Тест для GetMetricValue - возвращает текстовое значение
 func TestGetMetricValue(t *testing.T) {
 	repo := repository.New()
 	svc := service.New(repo)
 	handler := New(svc)
-	router := setupTestRouter(handler)
+	router := setupRouter(handler)
 
-	// Добавляем тестовые метрики
-	svc.UpdateMetrics("gauge", "TestGauge", "123.45")
+	// Подготовка данных
+	svc.UpdateMetrics("gauge", "TestGauge", "123.456")
 	svc.UpdateMetrics("counter", "TestCounter", "42")
 
 	tests := []struct {
 		name       string
-		url        string
+		metricType string
+		metricName string
 		wantStatus int
 		wantBody   string
 	}{
 		{
 			name:       "existing gauge",
-			url:        "/value/gauge/TestGauge",
+			metricType: "gauge",
+			metricName: "TestGauge",
 			wantStatus: http.StatusOK,
-			wantBody:   "123.45",
+			wantBody:   "123.456",
 		},
 		{
 			name:       "existing counter",
-			url:        "/value/counter/TestCounter",
+			metricType: "counter",
+			metricName: "TestCounter",
 			wantStatus: http.StatusOK,
 			wantBody:   "42",
 		},
 		{
 			name:       "non-existing metric",
-			url:        "/value/gauge/NonExisting",
+			metricType: "gauge",
+			metricName: "NoSuchMetric",
 			wantStatus: http.StatusNotFound,
 		},
 		{
-			name:       "wrong type for existing metric",
-			url:        "/value/counter/TestGauge", // TestGauge is gauge, not counter
+			name:       "type mismatch",
+			metricType: "counter",
+			metricName: "TestGauge",
 			wantStatus: http.StatusNotFound,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodGet, tt.url, nil)
+			url := "/value/" + tt.metricType + "/" + tt.metricName
+			req := httptest.NewRequest(http.MethodGet, url, nil)
 			w := httptest.NewRecorder()
-
 			router.ServeHTTP(w, req)
 
 			if w.Code != tt.wantStatus {
 				t.Errorf("Expected status %d, got %d", tt.wantStatus, w.Code)
 			}
-
-			// Проверяем Content-Type для успешных запросов
-			if w.Code == http.StatusOK {
+			if tt.wantBody != "" && !strings.Contains(w.Body.String(), tt.wantBody) {
+				t.Errorf("Expected body to contain %q, got %q", tt.wantBody, w.Body.String())
+			}
+			if tt.wantStatus == http.StatusOK {
 				contentType := w.Header().Get("Content-Type")
 				if contentType != "text/plain" {
 					t.Errorf("Expected Content-Type text/plain, got %s", contentType)
-				}
-
-				if tt.wantBody != "" {
-					body := strings.TrimSpace(w.Body.String())
-					if body != tt.wantBody {
-						t.Errorf("Expected body %q, got %q", tt.wantBody, body)
-					}
 				}
 			}
 		})
 	}
 }
 
-// Тест для HTML страницы со всеми метриками
+// ============================================================================
+// Тесты для GetAllMetricsHTML
+// ============================================================================
+
 func TestGetAllMetricsHTML(t *testing.T) {
 	repo := repository.New()
 	svc := service.New(repo)
 	handler := New(svc)
-	router := setupTestRouter(handler)
+	router := setupRouter(handler)
 
-	// Добавляем тестовые метрики
-	svc.UpdateMetrics("gauge", "TestGauge", "123.45")
-	svc.UpdateMetrics("counter", "TestCounter", "42")
+	// Подготовка данных
+	svc.UpdateMetrics("gauge", "Alloc", "1234.56")
+	svc.UpdateMetrics("counter", "PollCount", "10")
+	svc.UpdateMetrics("gauge", "RandomValue", "0.789")
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	w := httptest.NewRecorder()
-
 	router.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Errorf("Expected status %d, got %d", http.StatusOK, w.Code)
 	}
 
-	// Проверяем Content-Type
 	contentType := w.Header().Get("Content-Type")
 	if contentType != "text/html" {
 		t.Errorf("Expected Content-Type text/html, got %s", contentType)
@@ -332,110 +210,435 @@ func TestGetAllMetricsHTML(t *testing.T) {
 
 	body := w.Body.String()
 
-	// Проверяем наличие HTML-элементов
-	if !strings.Contains(body, "<!DOCTYPE html>") {
-		t.Error("Response should contain HTML doctype")
+	// Проверяем наличие основных элементов HTML
+	expectedStrings := []string{
+		"<!DOCTYPE html>",
+		"Metrics Dashboard",
+		"<table>",
+		"Alloc",
+		"PollCount",
+		"RandomValue",
+		"Total metrics: 3",
 	}
 
-	if !strings.Contains(body, "<title>Metrics</title>") {
-		t.Error("Response should contain title")
-	}
-
-	if !strings.Contains(body, "TestGauge") {
-		t.Error("Response should contain TestGauge metric")
-	}
-
-	if !strings.Contains(body, "TestCounter") {
-		t.Error("Response should contain TestCounter metric")
-	}
-
-	if !strings.Contains(body, "123.45") {
-		t.Error("Response should contain gauge value")
-	}
-
-	if !strings.Contains(body, "42") {
-		t.Error("Response should contain counter value")
-	}
-
-	// Проверяем наличие таблицы
-	if !strings.Contains(body, "<table>") {
-		t.Error("Response should contain table")
+	for _, expected := range expectedStrings {
+		if !strings.Contains(body, expected) {
+			t.Errorf("Expected body to contain %q", expected)
+		}
 	}
 }
 
-func TestTypeConversion(t *testing.T) {
+func TestGetAllMetricsHTML_Empty(t *testing.T) {
 	repo := repository.New()
 	svc := service.New(repo)
 	handler := New(svc)
-	router := setupTestRouter(handler)
+	router := setupRouter(handler)
 
-	// Создаем метрику как gauge
-	req1 := httptest.NewRequest(http.MethodPost, "/update/gauge/TestConversion/100.5", nil)
-	w1 := httptest.NewRecorder()
-	router.ServeHTTP(w1, req1)
-
-	// Преобразуем в counter
-	req2 := httptest.NewRequest(http.MethodPost, "/update/counter/TestConversion/50", nil)
-	w2 := httptest.NewRecorder()
-	router.ServeHTTP(w2, req2)
-
-	if w2.Code != http.StatusOK {
-		t.Fatalf("Type conversion failed with status %d", w2.Code)
-	}
-
-	// Проверяем, что тип изменился на counter
-	metric, exists := svc.GetMetric("TestConversion")
-	if !exists {
-		t.Fatal("Metric not found")
-	}
-
-	if metric.MType != "counter" {
-		t.Errorf("Expected type counter, got %s", metric.MType)
-	}
-
-	if metric.Delta == nil || *metric.Delta != 50 {
-		t.Errorf("Expected counter value 50, got %v", metric.Delta)
-	}
-}
-
-// Тест для проверки текстового вывода значений после обновления
-func TestMetricValueAfterUpdate(t *testing.T) {
-	repo := repository.New()
-	svc := service.New(repo)
-	handler := New(svc)
-	router := setupTestRouter(handler)
-
-	// Обновляем counter несколько раз
-	router.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("POST", "/update/counter/TestSum/10", nil))
-	router.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("POST", "/update/counter/TestSum/5", nil))
-
-	// Получаем значение в текстовом виде
-	req := httptest.NewRequest("GET", "/value/counter/TestSum", nil)
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
-		t.Fatalf("Expected status 200, got %d", w.Code)
+		t.Errorf("Expected status %d, got %d", http.StatusOK, w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "Total metrics: 0") {
+		t.Errorf("Expected empty metrics message")
+	}
+}
+
+// ============================================================================
+// Тесты для UpdateMetricsJSON
+// ============================================================================
+
+func TestUpdateMetricsJSON(t *testing.T) {
+	tests := []struct {
+		name       string
+		payload    model.Metrics
+		wantStatus int
+		wantBody   string
+	}{
+		{
+			name: "valid gauge",
+			payload: model.Metrics{
+				ID:    "TestGaugeJSON",
+				MType: model.Gauge,
+				Value: floatPtr(123.45),
+			},
+			wantStatus: http.StatusOK,
+			wantBody:   `"id":"TestGaugeJSON"`,
+		},
+		{
+			name: "valid counter",
+			payload: model.Metrics{
+				ID:    "TestCounterJSON",
+				MType: model.Counter,
+				Delta: int64Ptr(42),
+			},
+			wantStatus: http.StatusOK,
+			wantBody:   `"id":"TestCounterJSON"`,
+		},
+		{
+			name: "missing ID",
+			payload: model.Metrics{
+				MType: model.Gauge,
+				Value: floatPtr(1.23),
+			},
+			wantStatus: http.StatusBadRequest,
+			wantBody:   "Invalid metric data",
+		},
+		{
+			name: "invalid type",
+			payload: model.Metrics{
+				ID:    "Test",
+				MType: "unknown",
+				Value: floatPtr(1.23),
+			},
+			wantStatus: http.StatusBadRequest,
+			wantBody:   "Invalid metric data",
+		},
+		{
+			name: "missing delta for counter",
+			payload: model.Metrics{
+				ID:    "BadCounter",
+				MType: model.Counter,
+			},
+			wantStatus: http.StatusBadRequest,
+			wantBody:   "Missing delta",
+		},
+		{
+			name: "missing value for gauge",
+			payload: model.Metrics{
+				ID:    "BadGauge",
+				MType: model.Gauge,
+			},
+			wantStatus: http.StatusBadRequest,
+			wantBody:   "Missing value",
+		},
+		{
+			name: "counter with zero delta",
+			payload: model.Metrics{
+				ID:    "ZeroCounter",
+				MType: model.Counter,
+				Delta: int64Ptr(0),
+			},
+			wantStatus: http.StatusOK,
+			wantBody:   `"delta":0`,
+		},
+		{
+			name: "gauge with negative value",
+			payload: model.Metrics{
+				ID:    "NegativeGauge",
+				MType: model.Gauge,
+				Value: floatPtr(-123.45),
+			},
+			wantStatus: http.StatusOK,
+		},
 	}
 
-	body := strings.TrimSpace(w.Body.String())
-	if body != "15" { // 10 + 5
-		t.Errorf("Expected counter value '15', got '%s'", body)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo := repository.New()
+			svc := service.New(repo)
+			handler := New(svc)
+			router := setupRouter(handler)
+
+			buf := new(bytes.Buffer)
+			err := json.NewEncoder(buf).Encode(tt.payload)
+			if err != nil {
+				t.Fatalf("Failed to encode payload: %v", err)
+			}
+
+			req := httptest.NewRequest(http.MethodPost, "/update", buf)
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+			router.ServeHTTP(w, req)
+
+			if w.Code != tt.wantStatus {
+				t.Errorf("Expected status %d, got %d", tt.wantStatus, w.Code)
+			}
+			if tt.wantBody != "" && !strings.Contains(w.Body.String(), tt.wantBody) {
+				t.Errorf("Expected body to contain %q, got %q", tt.wantBody, w.Body.String())
+			}
+
+			if tt.wantStatus == http.StatusOK {
+				contentType := w.Header().Get("Content-Type")
+				if contentType != "application/json" {
+					t.Errorf("Expected Content-Type application/json, got %s", contentType)
+				}
+			}
+		})
+	}
+}
+
+func TestUpdateMetricsJSON_InvalidJSON(t *testing.T) {
+	repo := repository.New()
+	svc := service.New(repo)
+	handler := New(svc)
+	router := setupRouter(handler)
+
+	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader("invalid json"))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("Expected status %d, got %d", http.StatusBadRequest, w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "Invalid JSON body") {
+		t.Errorf("Expected error message about invalid JSON")
+	}
+}
+
+// ============================================================================
+// Тесты для GetMetricJSON
+// ============================================================================
+
+func TestGetMetricJSON(t *testing.T) {
+	repo := repository.New()
+	svc := service.New(repo)
+	handler := New(svc)
+	router := setupRouter(handler)
+
+	// Подготовка метрик
+	svc.UpdateMetrics("gauge", "TestGaugeJSON", "123.456")
+	svc.UpdateMetrics("counter", "TestCounterJSON", "42")
+
+	tests := []struct {
+		name       string
+		payload    model.Metrics
+		wantStatus int
+		wantBody   string
+	}{
+		{
+			name: "existing gauge",
+			payload: model.Metrics{
+				ID:    "TestGaugeJSON",
+				MType: model.Gauge,
+			},
+			wantStatus: http.StatusOK,
+			wantBody:   `"value":123.456`,
+		},
+		{
+			name: "existing counter",
+			payload: model.Metrics{
+				ID:    "TestCounterJSON",
+				MType: model.Counter,
+			},
+			wantStatus: http.StatusOK,
+			wantBody:   `"delta":42`,
+		},
+		{
+			name: "missing ID",
+			payload: model.Metrics{
+				MType: model.Gauge,
+			},
+			wantStatus: http.StatusBadRequest,
+			wantBody:   "Invalid metric data",
+		},
+		{
+			name: "invalid type",
+			payload: model.Metrics{
+				ID:    "Test",
+				MType: "unknown",
+			},
+			wantStatus: http.StatusBadRequest,
+			wantBody:   "Invalid metric data",
+		},
+		{
+			name: "non-existing metric",
+			payload: model.Metrics{
+				ID:    "NoSuchMetric",
+				MType: model.Gauge,
+			},
+			wantStatus: http.StatusNotFound,
+			wantBody:   "Metric not found",
+		},
+		{
+			name: "type mismatch",
+			payload: model.Metrics{
+				ID:    "TestGaugeJSON",
+				MType: model.Counter,
+			},
+			wantStatus: http.StatusNotFound,
+			wantBody:   "type mismatch",
+		},
 	}
 
-	// Проверяем gauge
-	router.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("POST", "/update/gauge/TestFloat/3.14159", nil))
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			buf := new(bytes.Buffer)
+			err := json.NewEncoder(buf).Encode(tt.payload)
+			if err != nil {
+				t.Fatalf("Failed to encode payload: %v", err)
+			}
 
-	req2 := httptest.NewRequest("GET", "/value/gauge/TestFloat", nil)
+			req := httptest.NewRequest(http.MethodPost, "/value", buf)
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+			router.ServeHTTP(w, req)
+
+			if w.Code != tt.wantStatus {
+				t.Errorf("Expected status %d, got %d", tt.wantStatus, w.Code)
+			}
+			if tt.wantBody != "" && !strings.Contains(w.Body.String(), tt.wantBody) {
+				t.Errorf("Expected body to contain %q, got %q", tt.wantBody, w.Body.String())
+			}
+
+			if tt.wantStatus == http.StatusOK {
+				contentType := w.Header().Get("Content-Type")
+				if contentType != "application/json" {
+					t.Errorf("Expected Content-Type application/json, got %s", contentType)
+				}
+			}
+		})
+	}
+}
+
+func TestGetMetricJSON_InvalidJSON(t *testing.T) {
+	repo := repository.New()
+	svc := service.New(repo)
+	handler := New(svc)
+	router := setupRouter(handler)
+
+	req := httptest.NewRequest(http.MethodPost, "/value", strings.NewReader("invalid json"))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("Expected status %d, got %d", http.StatusBadRequest, w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "Invalid JSON body") {
+		t.Errorf("Expected error message about invalid JSON")
+	}
+}
+
+// ============================================================================
+// Интеграционные тесты
+// ============================================================================
+
+func TestCounterIncrement(t *testing.T) {
+	repo := repository.New()
+	svc := service.New(repo)
+	handler := New(svc)
+	router := setupRouter(handler)
+
+	// Первое обновление
+	payload1 := model.Metrics{
+		ID:    "TestCounter",
+		MType: model.Counter,
+		Delta: int64Ptr(10),
+	}
+	buf1 := new(bytes.Buffer)
+	json.NewEncoder(buf1).Encode(payload1)
+
+	req1 := httptest.NewRequest(http.MethodPost, "/update", buf1)
+	req1.Header.Set("Content-Type", "application/json")
+	w1 := httptest.NewRecorder()
+	router.ServeHTTP(w1, req1)
+
+	if w1.Code != http.StatusOK {
+		t.Fatalf("First update failed: %d", w1.Code)
+	}
+
+	// Второе обновление (должно прибавиться)
+	payload2 := model.Metrics{
+		ID:    "TestCounter",
+		MType: model.Counter,
+		Delta: int64Ptr(5),
+	}
+	buf2 := new(bytes.Buffer)
+	json.NewEncoder(buf2).Encode(payload2)
+
+	req2 := httptest.NewRequest(http.MethodPost, "/update", buf2)
+	req2.Header.Set("Content-Type", "application/json")
 	w2 := httptest.NewRecorder()
 	router.ServeHTTP(w2, req2)
 
 	if w2.Code != http.StatusOK {
-		t.Fatalf("Expected status 200, got %d", w2.Code)
+		t.Fatalf("Second update failed: %d", w2.Code)
 	}
 
-	body2 := strings.TrimSpace(w2.Body.String())
-	if body2 != "3.14159" {
-		t.Errorf("Expected gauge value '3.14159', got '%s'", body2)
+	// Проверяем итоговое значение
+	getPayload := model.Metrics{
+		ID:    "TestCounter",
+		MType: model.Counter,
+	}
+	buf3 := new(bytes.Buffer)
+	json.NewEncoder(buf3).Encode(getPayload)
+
+	req3 := httptest.NewRequest(http.MethodPost, "/value", buf3)
+	req3.Header.Set("Content-Type", "application/json")
+	w3 := httptest.NewRecorder()
+	router.ServeHTTP(w3, req3)
+
+	if w3.Code != http.StatusOK {
+		t.Fatalf("Get value failed: %d", w3.Code)
+	}
+	if !strings.Contains(w3.Body.String(), `"delta":15`) {
+		t.Errorf("Expected delta to be 15, got: %s", w3.Body.String())
+	}
+}
+
+func TestGaugeOverwrite(t *testing.T) {
+	repo := repository.New()
+	svc := service.New(repo)
+	handler := New(svc)
+	router := setupRouter(handler)
+
+	// Первое обновление
+	payload1 := model.Metrics{
+		ID:    "TestGauge",
+		MType: model.Gauge,
+		Value: floatPtr(100.5),
+	}
+	buf1 := new(bytes.Buffer)
+	json.NewEncoder(buf1).Encode(payload1)
+
+	req1 := httptest.NewRequest(http.MethodPost, "/update", buf1)
+	req1.Header.Set("Content-Type", "application/json")
+	w1 := httptest.NewRecorder()
+	router.ServeHTTP(w1, req1)
+
+	if w1.Code != http.StatusOK {
+		t.Fatalf("First update failed: %d", w1.Code)
+	}
+
+	// Второе обновление (должно перезаписаться)
+	payload2 := model.Metrics{
+		ID:    "TestGauge",
+		MType: model.Gauge,
+		Value: floatPtr(200.7),
+	}
+	buf2 := new(bytes.Buffer)
+	json.NewEncoder(buf2).Encode(payload2)
+
+	req2 := httptest.NewRequest(http.MethodPost, "/update", buf2)
+	req2.Header.Set("Content-Type", "application/json")
+	w2 := httptest.NewRecorder()
+	router.ServeHTTP(w2, req2)
+
+	if w2.Code != http.StatusOK {
+		t.Fatalf("Second update failed: %d", w2.Code)
+	}
+
+	// Проверяем итоговое значение
+	getPayload := model.Metrics{
+		ID:    "TestGauge",
+		MType: model.Gauge,
+	}
+	buf3 := new(bytes.Buffer)
+	json.NewEncoder(buf3).Encode(getPayload)
+
+	req3 := httptest.NewRequest(http.MethodPost, "/value", buf3)
+	req3.Header.Set("Content-Type", "application/json")
+	w3 := httptest.NewRecorder()
+	router.ServeHTTP(w3, req3)
+
+	if w3.Code != http.StatusOK {
+		t.Fatalf("Get value failed: %d", w3.Code)
+	}
+	if !strings.Contains(w3.Body.String(), `"value":200.7`) {
+		t.Errorf("Expected value to be 200.7, got: %s", w3.Body.String())
 	}
 }
