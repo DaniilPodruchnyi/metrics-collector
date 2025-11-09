@@ -68,5 +68,8 @@ func (s *Server) setupRoutes() chi.Router {
 	r.Get("/value/{type}/{name}", s.handlers.GetMetricValue)
 	r.Get("/", s.handlers.GetAllMetricsHTML)
 
+	r.Post("/update", s.handlers.UpdateMetricsJSON)
+	r.Post("/value", s.handlers.GetMetricJSON)
+
 	return r
 }

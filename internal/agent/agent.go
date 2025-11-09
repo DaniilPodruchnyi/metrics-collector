@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"log"
 	"math/rand"
@@ -143,18 +145,37 @@ func (a *Agent) sendMetrics() {
 
 // sendMetric отправляет одну метрику на сервер
 func (a *Agent) sendMetric(name string, metric *MetricValue) error {
-	url := a.buildMetricURL(name, metric)
+	url := a.config.GetServerURL() + "/update"
 
-	req, err := http.NewRequest(http.MethodPost, url, nil)
-	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
+	var jsonMetric struct {
+		ID    string   `json:"id"`
+		MType string   `json:"type"`
+		Delta *int64   `json:"delta,omitempty"`
+		Value *float64 `json:"value,omitempty"`
 	}
-	req.Header.Set("Content-Type", "text/plain")
+	jsonMetric.ID = name
+	jsonMetric.MType = metric.Type
+	if metric.Type == "counter" {
+		jsonMetric.Delta = &metric.Counter
+	} else if metric.Type == "gauge" {
+		jsonMetric.Value = &metric.Gauge
+	}
+
+	buf, err := json.Marshal(jsonMetric)
+	if err != nil {
+		return err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(buf))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "metrics-agent/1.0")
 
 	resp, err := a.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("failed to send request: %w", err)
+		return err
 	}
 	defer resp.Body.Close()
 

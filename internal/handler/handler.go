@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/DaniilPodruchnyi/metrics-collector/internal/model"
 	"github.com/DaniilPodruchnyi/metrics-collector/internal/service"
 	"github.com/go-chi/chi/v5"
 )
@@ -207,4 +208,70 @@ func (h *MetricHandler) GetAllMetricsHTML(w http.ResponseWriter, r *http.Request
 		http.Error(w, "Template execution error", http.StatusInternalServerError)
 		return
 	}
+}
+
+// UpdateMetricsJSON принимает JSON с метрикой в теле POST /update
+func (h *MetricHandler) UpdateMetricsJSON(w http.ResponseWriter, r *http.Request) {
+	var m model.Metrics
+	if err := json.NewDecoder(r.Body).Decode(&m); err != nil {
+		http.Error(w, "Invalid JSON body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	defer r.Body.Close()
+
+	if m.ID == "" || (m.MType != model.Gauge && m.MType != model.Counter) {
+		http.Error(w, "Invalid metric data: missing ID or invalid type", http.StatusBadRequest)
+		return
+	}
+
+	var metricVal string
+	if m.MType == model.Counter {
+		if m.Delta == nil {
+			http.Error(w, "Missing delta for counter metric", http.StatusBadRequest)
+			return
+		}
+		metricVal = strconv.FormatInt(*m.Delta, 10)
+	} else { // gauge
+		if m.Value == nil {
+			http.Error(w, "Missing value for gauge metric", http.StatusBadRequest)
+			return
+		}
+		metricVal = strconv.FormatFloat(*m.Value, 'g', -1, 64)
+	}
+
+	if err := h.service.UpdateMetrics(m.MType, m.ID, metricVal); err != nil {
+		status := getHTTPStatusFromError(err)
+		http.Error(w, err.Error(), status)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	// Можно вернуть подтверждение в JSON, например:
+	json.NewEncoder(w).Encode(m)
+}
+
+// GetMetricJSON - POST /value принимает ID и MType в JSON и возвращает метрику с заполненными значениями
+func (h *MetricHandler) GetMetricJSON(w http.ResponseWriter, r *http.Request) {
+	var req model.Metrics
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	defer r.Body.Close()
+
+	if req.ID == "" || (req.MType != model.Gauge && req.MType != model.Counter) {
+		http.Error(w, "Invalid metric data: missing ID or invalid type", http.StatusBadRequest)
+		return
+	}
+
+	metric, exists := h.service.GetMetric(req.ID)
+	if !exists || metric.MType != req.MType {
+		http.Error(w, "Metric not found or type mismatch", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(metric)
 }
