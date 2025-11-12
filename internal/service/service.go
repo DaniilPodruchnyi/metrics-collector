@@ -15,11 +15,12 @@ var (
 	ErrInvalidGaugeValue   = errors.New("invalid gauge value format")
 )
 
-// MetricRepository интерфейс для работы с хранилищем
+// MetricsRepository определяет интерфейс для работы с хранилищем метрик
 type MetricRepository interface {
 	Store(metric *model.Metrics)
 	Get(name string) (*model.Metrics, bool)
 	GetAll() map[string]*model.Metrics
+	LoadData(data map[string]*model.Metrics)
 }
 
 // Структура сервиса по работе с метриками
