@@ -9,10 +9,19 @@ import (
 	"github.com/DaniilPodruchnyi/metrics-collector/internal/model"
 )
 
+// PersistentStorage - интерфейс для персистентного хранения метрик
+type PersistentStorage interface {
+	Save(metrics map[string]*model.Metrics) error
+	Load() (map[string]*model.Metrics, error)
+}
+
 // FileStorage обрабатывает персистентность метрик в файл
 type FileStorage struct {
 	filePath string
 }
+
+// Проверяем, что FileStorage реализует PersistentStorage
+var _ PersistentStorage = (*FileStorage)(nil)
 
 // NewFileStorage создает новый FileStorage
 func NewFileStorage(filePath string) *FileStorage {

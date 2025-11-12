@@ -23,14 +23,16 @@ type Server struct {
 	config      *config.ServerConfig
 	service     *service.MetricService
 	handlers    *handler.MetricHandler
-	fileStorage *storage.FileStorage
-	repository  *repository.MemStorage
+	fileStorage storage.PersistentStorage
+	repository  repository.MetricRepository
+	httpServer  *http.Server
+	cancelFunc  context.CancelFunc
 }
 
 // Функция для инициализации сервера
 func New(cfg *config.ServerConfig) *Server {
-	// Создаем файловое хранилище
-	fileStorage := storage.NewFileStorage(cfg.FileStoragePath)
+	// Создаем файловое хранилище (через интерфейс)
+	var fileStorage storage.PersistentStorage = storage.NewFileStorage(cfg.FileStoragePath)
 
 	// Создаем repository
 	var metricsRepository *repository.MemStorage
@@ -64,16 +66,31 @@ func New(cfg *config.ServerConfig) *Server {
 }
 
 // Метод для запуска сервера
-func (s *Server) Start() error {
+func (s *Server) Start(ctx context.Context) error {
 	router := s.setupRoutes()
+
+	// Создаем контекст с отменой для graceful shutdown
+	serverCtx, cancel := context.WithCancel(ctx)
+	s.cancelFunc = cancel
 
 	// Запускаем периодическое сохранение, если интервал > 0
 	if !s.config.IsSyncMode() {
-		go s.startPeriodicSave(context.Background())
+		go s.startPeriodicSave(serverCtx)
+	}
+
+	s.httpServer = &http.Server{
+		Addr:    s.address,
+		Handler: router,
 	}
 
 	log.Printf("Server listening on %s", s.address)
-	return http.ListenAndServe(s.address, router)
+
+	// Запускаем сервер
+	if err := s.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		return err
+	}
+
+	return nil
 }
 
 // startPeriodicSave запускает периодическое сохранение метрик
@@ -113,14 +130,29 @@ func (s *Server) SaveOnUpdate() {
 	}
 }
 
-// Метод для остановки сервера
-func (s *Server) Stop() {
-	log.Println("Server is stopping, saving metrics...")
+// Shutdown выполняет graceful shutdown
+func (s *Server) Shutdown(ctx context.Context) error {
+	log.Println("Server is shutting down...")
+
+	// Отменяем контекст для остановки периодического сохранения
+	if s.cancelFunc != nil {
+		s.cancelFunc()
+	}
+
+	// Сохраняем метрики перед выходом
+	log.Println("Saving metrics before shutdown...")
 	if err := s.saveMetrics(); err != nil {
 		log.Printf("Failed to save metrics on shutdown: %v", err)
 	} else {
 		log.Printf("Metrics saved successfully on shutdown")
 	}
+
+	// Graceful shutdown HTTP сервера
+	if s.httpServer != nil {
+		return s.httpServer.Shutdown(ctx)
+	}
+
+	return nil
 }
 
 // Метод для настройки роутера сервера
@@ -140,20 +172,51 @@ func (s *Server) setupRoutes() chi.Router {
 	r.Use(middleware.RequestID)
 	r.Use(custommiddleware.ZapLoggerMiddleware(logger))
 
-	// Роуты
-	r.Post("/update", s.wrapWithSync(s.handlers.UpdateMetricsJSON))
+	// Роуты с проверкой статуса
+	r.Post("/update", s.wrapWithSyncSmart(s.handlers.UpdateMetricsJSON))
 	r.Post("/value", s.handlers.GetMetricJSON)
-	r.Post("/update/{type}/{name}/{value}", s.wrapWithSync(s.handlers.UpdateMetrics))
+	r.Post("/update/{type}/{name}/{value}", s.wrapWithSyncSmart(s.handlers.UpdateMetrics))
 	r.Get("/value/{type}/{name}", s.handlers.GetMetricValue)
 	r.Get("/", s.handlers.GetAllMetricsHTML)
 
 	return r
 }
 
-// wrapWithSync оборачивает handler для синхронного сохранения
-func (s *Server) wrapWithSync(handler http.HandlerFunc) http.HandlerFunc {
+// responseRecorder перехватывает статус ответа
+type responseRecorder struct {
+	http.ResponseWriter
+	statusCode int
+	written    bool
+}
+
+func (rr *responseRecorder) WriteHeader(code int) {
+	if !rr.written {
+		rr.statusCode = code
+		rr.written = true
+		rr.ResponseWriter.WriteHeader(code)
+	}
+}
+
+func (rr *responseRecorder) Write(b []byte) (int, error) {
+	if !rr.written {
+		rr.WriteHeader(http.StatusOK)
+	}
+	return rr.ResponseWriter.Write(b)
+}
+
+// wrapWithSyncSmart оборачивает handler для синхронного сохранения только при успехе
+func (s *Server) wrapWithSyncSmart(handler http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		handler(w, r)
-		s.SaveOnUpdate()
+		recorder := &responseRecorder{
+			ResponseWriter: w,
+			statusCode:     http.StatusOK,
+		}
+
+		handler(recorder, r)
+
+		// Сохраняем только если запрос успешен (2xx)
+		if recorder.statusCode >= 200 && recorder.statusCode < 300 {
+			s.SaveOnUpdate()
+		}
 	}
 }
