@@ -6,6 +6,14 @@ import (
 	"github.com/DaniilPodruchnyi/metrics-collector/internal/model"
 )
 
+// MetricsRepository определяет интерфейс для работы с хранилищем метрик
+type MetricRepository interface {
+	Store(metric *model.Metrics)
+	Get(name string) (*model.Metrics, bool)
+	GetAll() map[string]*model.Metrics
+	LoadData(data map[string]*model.Metrics)
+}
+
 // Структура для работы с хранилищем данных метрик
 type MemStorage struct {
 	data map[string]*model.Metrics
