@@ -37,7 +37,9 @@ func ParseServerConfig() (*ServerConfig, error) {
 	address := getEnvOrFlagString("ADDRESS", *addrFlag, defaultAddr)
 	storeInterval := getEnvOrFlagInt("STORE_INTERVAL", *intervalFlag, defaultInterval)
 	fileStoragePath := getEnvOrFlagString("FILE_STORAGE_PATH", *fileFlag, defaultStoragePath)
-	restore := getEnvOrFlagBool("RESTORE", *restoreFlag, defaultRestore)
+
+	// Передаем "r" как имя флага для Lookup
+	restore := getEnvOrFlagBool("RESTORE", "r", *restoreFlag, defaultRestore)
 
 	config := &ServerConfig{
 		Address:         address,
@@ -52,15 +54,28 @@ func ParseServerConfig() (*ServerConfig, error) {
 	return config, nil
 }
 
-func getEnvOrFlagBool(envKey string, flagVal bool, defaultVal bool) bool {
+// getEnvOrFlagBool корректно обрабатывает bool флаги
+// envKey - имя переменной окружения
+// flagName - имя флага для flag.Lookup (например, "r")
+// flagVal - текущее значение флага
+// defaultVal - значение по умолчанию
+func getEnvOrFlagBool(envKey string, flagName string, flagVal bool, defaultVal bool) bool {
+	// Проверяем переменную окружения (приоритет 1)
 	if envVal := os.Getenv(envKey); envVal != "" {
 		if parsed, err := strconv.ParseBool(envVal); err == nil {
 			return parsed
 		}
 	}
-	// Если флаг явно указан (отличается от дефолта), используем его
-	// Это работает только если дефолт != flagVal
-	return flagVal
+
+	// Проверяем, был ли флаг явно указан (приоритет 2)
+	f := flag.Lookup(flagName)
+	if f != nil && f.Value.String() != f.DefValue {
+		// Флаг был явно указан, возвращаем его значение
+		return flagVal
+	}
+
+	// Возвращаем дефолт (приоритет 3)
+	return defaultVal
 }
 
 // validate проверяет корректность конфигурации сервера
