@@ -1,10 +1,12 @@
 package main
 
 import (
+	"context"
 	"log"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/DaniilPodruchnyi/metrics-collector/internal/config"
 	"github.com/DaniilPodruchnyi/metrics-collector/internal/server"
@@ -23,21 +25,35 @@ func main() {
 	// Инициализация сервера
 	srv := server.New(cfg)
 
-	// Обработка graceful shutdown
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	// Создаем контекст для управления жизненным циклом
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
+	// Канал для graceful shutdown
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM, syscall.SIGINT)
+
+	// Запускаем сервер в горутине
 	go func() {
-		<-sigChan
-		log.Println("Received shutdown signal")
-		srv.Stop()
-		os.Exit(0)
+		log.Printf("Server starting on %s", cfg.Address)
+		if err := srv.Start(ctx); err != nil {
+			log.Printf("Server error: %v", err)
+		}
 	}()
 
-	log.Printf("Server starting on %s", cfg.Address)
+	// Ждем сигнал остановки
+	sig := <-sigChan
+	log.Printf("Received signal: %v", sig)
 
-	// Запуск сервера
-	if err := srv.Start(); err != nil {
-		log.Fatal("Server failed:", err)
+	// Создаем контекст с таймаутом для graceful shutdown
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer shutdownCancel()
+
+	// Выполняем graceful shutdown
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		log.Printf("Server shutdown error: %v", err)
+		os.Exit(1)
 	}
+
+	log.Println("Server stopped gracefully")
 }
