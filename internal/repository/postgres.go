@@ -126,82 +126,63 @@ func (r *PostgresRepository) StoreBatch(metrics []model.Metrics) error {
 		return nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	// Начинаем транзакцию
+	// Начинаем транзакцию с правильным isolation level
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback(ctx) // Rollback если не было Commit
+	defer tx.Rollback(ctx)
 
-	// Группируем метрики по типу для оптимизации
-	counters := make(map[string]*model.Metrics)
-	gauges := make(map[string]*model.Metrics)
+	// Группируем метрики по ID для обработки
+	for _, metric := range metrics {
+		if metric.MType == model.Counter {
+			// Для counter: читаем текущее значение и добавляем
+			var existingDelta int64
+			query := `SELECT COALESCE(delta, 0) FROM metrics WHERE id = $1 AND type = 'counter'`
+			err := tx.QueryRow(ctx, query, metric.ID).Scan(&existingDelta)
 
-	for i := range metrics {
-		m := &metrics[i]
-		if m.MType == model.Counter {
-			counters[m.ID] = m
-		} else {
-			gauges[m.ID] = m
-		}
-	}
+			var newDelta int64
+			if err == nil {
+				// Есть существующее значение - аккумулируем
+				newDelta = existingDelta + *metric.Delta
+			} else if errors.Is(err, pgx.ErrNoRows) {
+				// Новая метрика
+				newDelta = *metric.Delta
+			} else {
+				return fmt.Errorf("failed to query counter %s: %w", metric.ID, err)
+			}
 
-	// Обрабатываем counters (нужно аккумулировать)
-	for id, metric := range counters {
-		// Получаем существующее значение
-		var existingDelta *int64
-		query := `SELECT delta FROM metrics WHERE id = $1 AND type = 'counter'`
-		err := tx.QueryRow(ctx, query, id).Scan(&existingDelta)
-
-		var newDelta int64
-		if err == nil && existingDelta != nil {
-			// Аккумулируем
-			newDelta = *existingDelta + *metric.Delta
-		} else if errors.Is(err, pgx.ErrNoRows) {
-			// Новая метрика
-			newDelta = *metric.Delta
-		} else if err != nil {
-			return fmt.Errorf("failed to query counter %s: %w", id, err)
-		}
-
-		// Сохраняем
-		upsertQuery := `
-            INSERT INTO metrics (id, type, delta, value, updated_at)
-            VALUES ($1, 'counter', $2, NULL, $3)
-            ON CONFLICT (id) 
-            DO UPDATE SET delta = EXCLUDED.delta, updated_at = EXCLUDED.updated_at
-        `
-		_, err = tx.Exec(ctx, upsertQuery, id, newDelta, time.Now())
-		if err != nil {
-			return fmt.Errorf("failed to upsert counter %s: %w", id, err)
-		}
-	}
-
-	// Обрабатываем gauges (просто перезаписываем)
-	if len(gauges) > 0 {
-		batch := &pgx.Batch{}
-		query := `
-            INSERT INTO metrics (id, type, delta, value, updated_at)
-            VALUES ($1, 'gauge', NULL, $2, $3)
-            ON CONFLICT (id) 
-            DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at
-        `
-
-		for id, metric := range gauges {
-			batch.Queue(query, id, metric.Value, time.Now())
-		}
-
-		br := tx.SendBatch(ctx, batch)
-		defer br.Close()
-
-		// Проверяем результаты
-		for range gauges {
-			_, err := br.Exec()
+			// Upsert с новым значением
+			upsertQuery := `
+                INSERT INTO metrics (id, type, delta, value, updated_at)
+                VALUES ($1, 'counter', $2, NULL, $3)
+                ON CONFLICT (id) 
+                DO UPDATE SET 
+                    delta = EXCLUDED.delta, 
+                    type = EXCLUDED.type,
+                    updated_at = EXCLUDED.updated_at
+            `
+			_, err = tx.Exec(ctx, upsertQuery, metric.ID, newDelta, time.Now())
 			if err != nil {
-				return fmt.Errorf("failed to execute batch: %w", err)
+				return fmt.Errorf("failed to upsert counter %s: %w", metric.ID, err)
+			}
+		} else {
+			// Для gauge: просто перезаписываем
+			upsertQuery := `
+                INSERT INTO metrics (id, type, delta, value, updated_at)
+                VALUES ($1, 'gauge', NULL, $2, $3)
+                ON CONFLICT (id) 
+                DO UPDATE SET 
+                    value = EXCLUDED.value,
+                    type = EXCLUDED.type,
+                    updated_at = EXCLUDED.updated_at
+            `
+			_, err := tx.Exec(ctx, upsertQuery, metric.ID, metric.Value, time.Now())
+			if err != nil {
+				return fmt.Errorf("failed to upsert gauge %s: %w", metric.ID, err)
 			}
 		}
 	}

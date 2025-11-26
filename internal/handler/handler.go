@@ -299,8 +299,13 @@ func (h *MetricHandler) UpdateMetricsBatch(w http.ResponseWriter, r *http.Reques
 
 	// Валидация всех метрик перед обработкой
 	for i, m := range metrics {
-		if m.ID == "" || (m.MType != model.Gauge && m.MType != model.Counter) {
-			http.Error(w, fmt.Sprintf("Invalid metric at index %d: missing ID or invalid type", i), http.StatusBadRequest)
+		if m.ID == "" {
+			http.Error(w, fmt.Sprintf("Invalid metric at index %d: missing ID", i), http.StatusBadRequest)
+			return
+		}
+
+		if m.MType != model.Gauge && m.MType != model.Counter {
+			http.Error(w, fmt.Sprintf("Invalid metric at index %d: invalid type '%s'", i, m.MType), http.StatusBadRequest)
 			return
 		}
 
@@ -317,6 +322,7 @@ func (h *MetricHandler) UpdateMetricsBatch(w http.ResponseWriter, r *http.Reques
 
 	// Выполняем batch update
 	if err := h.service.UpdateMetricsBatch(metrics); err != nil {
+		log.Printf("Failed to update metrics batch: %v", err) // Добавляем логирование
 		status := getHTTPStatusFromError(err)
 		http.Error(w, err.Error(), status)
 		return
