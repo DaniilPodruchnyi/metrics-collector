@@ -120,6 +120,100 @@ func (r *PostgresRepository) GetAll() map[string]*model.Metrics {
 	return result
 }
 
+// StoreBatch сохраняет множество метрик в одной транзакции
+func (r *PostgresRepository) StoreBatch(metrics []model.Metrics) error {
+	if len(metrics) == 0 {
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Начинаем транзакцию
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback(ctx) // Rollback если не было Commit
+
+	// Группируем метрики по типу для оптимизации
+	counters := make(map[string]*model.Metrics)
+	gauges := make(map[string]*model.Metrics)
+
+	for i := range metrics {
+		m := &metrics[i]
+		if m.MType == model.Counter {
+			counters[m.ID] = m
+		} else {
+			gauges[m.ID] = m
+		}
+	}
+
+	// Обрабатываем counters (нужно аккумулировать)
+	for id, metric := range counters {
+		// Получаем существующее значение
+		var existingDelta *int64
+		query := `SELECT delta FROM metrics WHERE id = $1 AND type = 'counter'`
+		err := tx.QueryRow(ctx, query, id).Scan(&existingDelta)
+
+		var newDelta int64
+		if err == nil && existingDelta != nil {
+			// Аккумулируем
+			newDelta = *existingDelta + *metric.Delta
+		} else if errors.Is(err, pgx.ErrNoRows) {
+			// Новая метрика
+			newDelta = *metric.Delta
+		} else if err != nil {
+			return fmt.Errorf("failed to query counter %s: %w", id, err)
+		}
+
+		// Сохраняем
+		upsertQuery := `
+            INSERT INTO metrics (id, type, delta, value, updated_at)
+            VALUES ($1, 'counter', $2, NULL, $3)
+            ON CONFLICT (id) 
+            DO UPDATE SET delta = EXCLUDED.delta, updated_at = EXCLUDED.updated_at
+        `
+		_, err = tx.Exec(ctx, upsertQuery, id, newDelta, time.Now())
+		if err != nil {
+			return fmt.Errorf("failed to upsert counter %s: %w", id, err)
+		}
+	}
+
+	// Обрабатываем gauges (просто перезаписываем)
+	if len(gauges) > 0 {
+		batch := &pgx.Batch{}
+		query := `
+            INSERT INTO metrics (id, type, delta, value, updated_at)
+            VALUES ($1, 'gauge', NULL, $2, $3)
+            ON CONFLICT (id) 
+            DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at
+        `
+
+		for id, metric := range gauges {
+			batch.Queue(query, id, metric.Value, time.Now())
+		}
+
+		br := tx.SendBatch(ctx, batch)
+		defer br.Close()
+
+		// Проверяем результаты
+		for range gauges {
+			_, err := br.Exec()
+			if err != nil {
+				return fmt.Errorf("failed to execute batch: %w", err)
+			}
+		}
+	}
+
+	// Коммитим транзакцию
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
+	return nil
+}
+
 // LoadData не используется для PostgreSQL (данные уже в БД)
 func (r *PostgresRepository) LoadData(data map[string]*model.Metrics) {
 	// Для PostgreSQL эта операция не нужна, данные уже персистентны

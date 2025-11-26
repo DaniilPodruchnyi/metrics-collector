@@ -23,6 +23,12 @@ type MetricRepository interface {
 	LoadData(data map[string]*model.Metrics)
 }
 
+// BatchMetricRepository расширяет интерфейс для batch операций
+type BatchMetricRepository interface {
+	MetricRepository
+	StoreBatch(metrics []model.Metrics) error
+}
+
 // Структура сервиса по работе с метриками
 type MetricService struct {
 	repo MetricRepository
@@ -117,4 +123,28 @@ func (s *MetricService) GetMetric(name string) (*model.Metrics, bool) {
 // GetAllMetrics возвращает все метрики
 func (s *MetricService) GetAllMetrics() map[string]*model.Metrics {
 	return s.repo.GetAll()
+}
+
+// UpdateMetricsBatch обновляет множество метрик за один вызов
+func (s *MetricService) UpdateMetricsBatch(metrics []model.Metrics) error {
+	// Используем BatchStorer если repository его поддерживает
+	if batchRepo, ok := s.repo.(BatchMetricRepository); ok {
+		return batchRepo.StoreBatch(metrics)
+	}
+
+	// Fallback: обрабатываем по одной метрике
+	for _, m := range metrics {
+		var valueStr string
+		if m.MType == model.Counter {
+			valueStr = strconv.FormatInt(*m.Delta, 10)
+		} else {
+			valueStr = strconv.FormatFloat(*m.Value, 'g', -1, 64)
+		}
+
+		if err := s.UpdateMetrics(m.MType, m.ID, valueStr); err != nil {
+			return fmt.Errorf("failed to update metric %s: %w", m.ID, err)
+		}
+	}
+
+	return nil
 }

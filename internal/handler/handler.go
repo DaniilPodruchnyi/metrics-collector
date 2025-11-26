@@ -282,6 +282,51 @@ func (h *MetricHandler) GetMetricJSON(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(metric)
 }
 
+// UpdateMetricsBatch принимает массив метрик для batch update
+func (h *MetricHandler) UpdateMetricsBatch(w http.ResponseWriter, r *http.Request) {
+	var metrics []model.Metrics
+	if err := json.NewDecoder(r.Body).Decode(&metrics); err != nil {
+		http.Error(w, "Invalid JSON body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	defer r.Body.Close()
+
+	// Проверяем что batch не пустой
+	if len(metrics) == 0 {
+		http.Error(w, "Empty batch not allowed", http.StatusBadRequest)
+		return
+	}
+
+	// Валидация всех метрик перед обработкой
+	for i, m := range metrics {
+		if m.ID == "" || (m.MType != model.Gauge && m.MType != model.Counter) {
+			http.Error(w, fmt.Sprintf("Invalid metric at index %d: missing ID or invalid type", i), http.StatusBadRequest)
+			return
+		}
+
+		if m.MType == model.Counter && m.Delta == nil {
+			http.Error(w, fmt.Sprintf("Missing delta for counter metric at index %d", i), http.StatusBadRequest)
+			return
+		}
+
+		if m.MType == model.Gauge && m.Value == nil {
+			http.Error(w, fmt.Sprintf("Missing value for gauge metric at index %d", i), http.StatusBadRequest)
+			return
+		}
+	}
+
+	// Выполняем batch update
+	if err := h.service.UpdateMetricsBatch(metrics); err != nil {
+		status := getHTTPStatusFromError(err)
+		http.Error(w, err.Error(), status)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(metrics)
+}
+
 // PingDB проверяет соединение с базой данных
 func (h *MetricHandler) PingDB(w http.ResponseWriter, r *http.Request) {
 	if h.dbPool == nil {
