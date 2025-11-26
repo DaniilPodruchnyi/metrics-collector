@@ -61,6 +61,28 @@ func (r *MemStorage) GetAll() map[string]*model.Metrics {
 	return result
 }
 
+// StoreBatch сохраняет множество метрик (для совместимости с интерфейсом)
+func (r *MemStorage) StoreBatch(metrics []model.Metrics) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	for i := range metrics {
+		m := &metrics[i]
+
+		// Для counter нужно аккумулировать
+		if m.MType == model.Counter {
+			if existing, exists := r.data[m.ID]; exists && existing.MType == model.Counter && existing.Delta != nil {
+				newDelta := *existing.Delta + *m.Delta
+				m.Delta = &newDelta
+			}
+		}
+
+		r.data[m.ID] = m
+	}
+
+	return nil
+}
+
 // LoadData загружает данные в хранилище (для восстановления из файла)
 func (r *MemStorage) LoadData(data map[string]*model.Metrics) {
 	r.mu.Lock()

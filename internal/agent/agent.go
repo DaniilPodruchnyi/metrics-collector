@@ -129,24 +129,104 @@ func (a *Agent) updateRuntimeMetrics(ms *runtime.MemStats) {
 	a.metrics["TotalAlloc"].Gauge = float64(ms.TotalAlloc)
 }
 
-// sendMetrics отправляет все метрики на сервер
+// sendMetrics отправляет все метрики на сервер батчем
 func (a *Agent) sendMetrics() {
-	successCount := 0
-	errorCount := 0
+	// Собираем все метрики в batch
+	batch := make([]model.Metrics, 0, len(a.metrics))
 
 	for name, metric := range a.metrics {
-		if err := a.sendMetric(name, metric); err != nil {
-			log.Printf("Failed to send metric %s: %v", name, err)
-			errorCount++
-		} else {
-			successCount++
+		m := model.Metrics{
+			ID:    name,
+			MType: metric.Type,
 		}
+
+		switch metric.Type {
+		case "counter":
+			m.Delta = &metric.Counter
+		case "gauge":
+			m.Value = &metric.Gauge
+		}
+
+		batch = append(batch, m)
 	}
 
-	log.Printf("Metrics sent: %d success, %d errors", successCount, errorCount)
+	// Не отправляем пустые батчи
+	if len(batch) == 0 {
+		log.Println("No metrics to send")
+		return
+	}
+
+	// Пытаемся отправить batch
+	if err := a.sendMetricsBatch(batch); err != nil {
+		log.Printf("Failed to send metrics batch: %v", err)
+
+		// Fallback: отправляем по одной (для обратной совместимости)
+		log.Println("Falling back to single metric sending...")
+		successCount := 0
+		errorCount := 0
+
+		for name, metric := range a.metrics {
+			if err := a.sendMetric(name, metric); err != nil {
+				log.Printf("Failed to send metric %s: %v", name, err)
+				errorCount++
+			} else {
+				successCount++
+			}
+		}
+
+		log.Printf("Fallback complete: %d success, %d errors", successCount, errorCount)
+	} else {
+		log.Printf("Successfully sent batch of %d metrics", len(batch))
+	}
 }
 
-// sendMetric отправляет одну метрику на сервер
+// sendMetricsBatch отправляет метрики батчем на /updates
+func (a *Agent) sendMetricsBatch(metrics []model.Metrics) error {
+	url := a.config.GetServerURL() + "/updates"
+
+	// Сериализуем в JSON
+	buf, err := json.Marshal(metrics)
+	if err != nil {
+		return fmt.Errorf("failed to marshal metrics: %w", err)
+	}
+
+	// Сжимаем данные gzip
+	var gzipBuf bytes.Buffer
+	gz := gzip.NewWriter(&gzipBuf)
+	if _, err := gz.Write(buf); err != nil {
+		return fmt.Errorf("failed to compress data: %w", err)
+	}
+	if err := gz.Close(); err != nil {
+		return fmt.Errorf("failed to close gzip writer: %w", err)
+	}
+
+	// Создаем запрос
+	req, err := http.NewRequest(http.MethodPost, url, &gzipBuf)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Encoding", "gzip")
+	req.Header.Set("Accept-Encoding", "gzip")
+	req.Header.Set("User-Agent", "metrics-agent/2.0")
+
+	// Отправляем
+	resp, err := a.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("server responded with status %d: %s", resp.StatusCode, string(body))
+	}
+
+	return nil
+}
+
+// sendMetric отправляет одну метрику на сервер (fallback для обратной совместимости)
 func (a *Agent) sendMetric(name string, metric *MetricValue) error {
 	url := a.config.GetServerURL() + "/update"
 
@@ -175,7 +255,7 @@ func (a *Agent) sendMetric(name string, metric *MetricValue) error {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "metrics-agent/1.0")
+	req.Header.Set("User-Agent", "metrics-agent/2.0")
 
 	resp, err := a.client.Do(req)
 	if err != nil {
@@ -190,7 +270,7 @@ func (a *Agent) sendMetric(name string, metric *MetricValue) error {
 	return nil
 }
 
-// buildMetricURL строит URL для отправки метрики
+// buildMetricURL строит URL для отправки метрики (legacy)
 func (a *Agent) buildMetricURL(name string, metric *MetricValue) string {
 	switch metric.Type {
 	case "gauge":
@@ -231,6 +311,7 @@ func (a *Agent) GetMetric(name string) (*MetricValue, bool) {
 }
 
 // SendMetricJSON отправляет метрику на сервер в формате JSON с gzip сжатием
+// (Вспомогательная функция, можно использовать отдельно)
 func SendMetricJSON(serverURL string, metric model.Metrics) error {
 	// Сериализуем метрику в JSON
 	data, err := json.Marshal(metric)
@@ -260,7 +341,7 @@ func SendMetricJSON(serverURL string, metric model.Metrics) error {
 	req.Header.Set("Accept-Encoding", "gzip")
 
 	// Отправляем запрос
-	client := &http.Client{}
+	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to send request: %w", err)
@@ -276,12 +357,49 @@ func SendMetricJSON(serverURL string, metric model.Metrics) error {
 	return nil
 }
 
-// SendMetricsJSONBatch отправляет несколько метрик за один запрос
+// SendMetricsJSONBatch отправляет несколько метрик батчем на /updates
 func SendMetricsJSONBatch(serverURL string, metrics []model.Metrics) error {
-	for _, metric := range metrics {
-		if err := SendMetricJSON(serverURL, metric); err != nil {
-			return err
-		}
+	if len(metrics) == 0 {
+		return nil
 	}
+
+	// Сериализуем весь массив
+	data, err := json.Marshal(metrics)
+	if err != nil {
+		return fmt.Errorf("failed to marshal metrics batch: %w", err)
+	}
+
+	// Сжимаем
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	if _, err := gz.Write(data); err != nil {
+		return fmt.Errorf("failed to compress data: %w", err)
+	}
+	if err := gz.Close(); err != nil {
+		return fmt.Errorf("failed to close gzip writer: %w", err)
+	}
+
+	// Отправляем на /updates
+	req, err := http.NewRequest(http.MethodPost, serverURL+"/updates", &buf)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Encoding", "gzip")
+	req.Header.Set("Accept-Encoding", "gzip")
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("server returned status %d: %s", resp.StatusCode, string(body))
+	}
+
 	return nil
 }
