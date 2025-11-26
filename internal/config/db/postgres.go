@@ -2,10 +2,14 @@ package db
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jackc/pgx/v5/stdlib"
+	"github.com/pressly/goose/v3"
 )
 
 // PostgresConfig содержит настройки пула соединений
@@ -55,4 +59,47 @@ func DefaultPostgresConfig(dsn string) PostgresConfig {
 		MaxConnLifetime: time.Hour,
 		MaxConnIdleTime: 30 * time.Minute,
 	}
+}
+
+// RunMigrations выполняет миграции базы данных
+func RunMigrations(ctx context.Context, pool *pgxpool.Pool, migrationsDir string) error {
+	// Получаем *sql.DB из pgxpool для goose
+	config := pool.Config().ConnConfig
+	connString := stdlib.RegisterConnConfig(config)
+	db, err := sql.Open("pgx", connString)
+	if err != nil {
+		return fmt.Errorf("failed to open database for migrations: %w", err)
+	}
+	defer db.Close()
+
+	// Устанавливаем диалект
+	if err := goose.SetDialect("postgres"); err != nil {
+		return fmt.Errorf("failed to set goose dialect: %w", err)
+	}
+
+	// Запускаем миграции
+	log.Printf("Running migrations from %s", migrationsDir)
+	if err := goose.Up(db, migrationsDir); err != nil {
+		return fmt.Errorf("failed to run migrations: %w", err)
+	}
+
+	log.Println("Migrations completed successfully")
+	return nil
+}
+
+// GetMigrationStatus возвращает статус миграций
+func GetMigrationStatus(ctx context.Context, pool *pgxpool.Pool, migrationsDir string) error {
+	config := pool.Config().ConnConfig
+	connString := stdlib.RegisterConnConfig(config)
+	db, err := sql.Open("pgx", connString)
+	if err != nil {
+		return fmt.Errorf("failed to open database: %w", err)
+	}
+	defer db.Close()
+
+	if err := goose.SetDialect("postgres"); err != nil {
+		return fmt.Errorf("failed to set goose dialect: %w", err)
+	}
+
+	return goose.Status(db, migrationsDir)
 }
