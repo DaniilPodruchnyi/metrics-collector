@@ -35,7 +35,7 @@ func main() {
 
 	// Запускаем сервер в горутине
 	go func() {
-		log.Printf("Server starting on %s", cfg.Address)
+		log.Printf("Starting server on %s", cfg.Address)
 		if err := srv.Start(ctx); err != nil {
 			log.Printf("Server error: %v", err)
 		}

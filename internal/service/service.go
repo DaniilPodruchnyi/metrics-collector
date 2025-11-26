@@ -62,12 +62,13 @@ func (s *MetricService) updateCounter(name, value string) error {
 
 	existing, exists := s.repo.Get(name)
 
-	if exists && existing.MType == model.Counter {
+	if exists && existing.MType == model.Counter && existing.Delta != nil {
 		// Увеличиваем существующее значение counter
-		*existing.Delta += delta
+		newDelta := *existing.Delta + delta
+		existing.Delta = &newDelta
 		s.repo.Store(existing)
 	} else {
-		// Создаем новую counter метрику или перезаписываем gauge
+		// Создаем новую counter метрику
 		metric := &model.Metrics{
 			ID:    name,
 			MType: model.Counter,
