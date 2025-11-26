@@ -1,27 +1,33 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"html/template"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/DaniilPodruchnyi/metrics-collector/internal/model"
 	"github.com/DaniilPodruchnyi/metrics-collector/internal/service"
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type MetricHandler struct {
 	service *service.MetricService
+	dbPool  *pgxpool.Pool
 }
 
 // Функция для инициализации handlers
-func New(svc *service.MetricService) *MetricHandler {
+func New(svc *service.MetricService, pool *pgxpool.Pool) *MetricHandler {
 	return &MetricHandler{
 		service: svc,
+		dbPool:  pool,
 	}
 }
 
@@ -274,4 +280,24 @@ func (h *MetricHandler) GetMetricJSON(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(metric)
+}
+
+// PingDB проверяет соединение с базой данных
+func (h *MetricHandler) PingDB(w http.ResponseWriter, r *http.Request) {
+	if h.dbPool == nil {
+		http.Error(w, "Database not configured", http.StatusInternalServerError)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 1*time.Second)
+	defer cancel()
+
+	if err := h.dbPool.Ping(ctx); err != nil {
+		log.Printf("Database ping failed: %v", err)
+		http.Error(w, "Database unavailable", http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("OK"))
 }

@@ -15,6 +15,7 @@ type ServerConfig struct {
 	StoreInterval   time.Duration
 	FileStoragePath string
 	Restore         bool
+	DatabaseDSN     string
 }
 
 func ParseServerConfig() (*ServerConfig, error) {
@@ -30,6 +31,7 @@ func ParseServerConfig() (*ServerConfig, error) {
 		intervalFlag = flag.Int("i", defaultInterval, "store interval in seconds")
 		fileFlag     = flag.String("f", "", "file storage path")
 		restoreFlag  = flag.Bool("r", defaultRestore, "restore from file on startup")
+		databaseFlag = flag.String("d", "", "database DSN")
 	)
 	flag.Parse()
 
@@ -37,6 +39,7 @@ func ParseServerConfig() (*ServerConfig, error) {
 	address := getEnvOrFlagString("ADDRESS", *addrFlag, defaultAddr)
 	storeInterval := getEnvOrFlagInt("STORE_INTERVAL", *intervalFlag, defaultInterval)
 	fileStoragePath := getEnvOrFlagString("FILE_STORAGE_PATH", *fileFlag, defaultStoragePath)
+	databaseDSN := getEnvOrFlagString("DATABASE_DSN", *databaseFlag, "")
 
 	// Передаем "r" как имя флага для Lookup
 	restore := getEnvOrFlagBool("RESTORE", "r", *restoreFlag, defaultRestore)
@@ -46,6 +49,7 @@ func ParseServerConfig() (*ServerConfig, error) {
 		StoreInterval:   time.Duration(storeInterval) * time.Second,
 		FileStoragePath: fileStoragePath,
 		Restore:         restore,
+		DatabaseDSN:     databaseDSN,
 	}
 
 	if err := config.validate(); err != nil {
