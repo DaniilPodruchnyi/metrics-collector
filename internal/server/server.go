@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/DaniilPodruchnyi/metrics-collector/internal/config"
+	"github.com/DaniilPodruchnyi/metrics-collector/internal/config/db"
 	"github.com/DaniilPodruchnyi/metrics-collector/internal/handler"
 	custommiddleware "github.com/DaniilPodruchnyi/metrics-collector/internal/middleware"
 	"github.com/DaniilPodruchnyi/metrics-collector/internal/repository"
@@ -14,6 +15,7 @@ import (
 	"github.com/DaniilPodruchnyi/metrics-collector/internal/storage"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/zap"
 )
 
@@ -27,6 +29,7 @@ type Server struct {
 	repository  repository.MetricRepository
 	httpServer  *http.Server
 	cancelFunc  context.CancelFunc
+	dbPool      *pgxpool.Pool
 }
 
 // Функция для инициализации сервера
@@ -52,8 +55,22 @@ func New(cfg *config.ServerConfig) *Server {
 		metricsRepository = repository.New()
 	}
 
+	// Инициализируем БД, если DSN указан
+	var pool *pgxpool.Pool
+	if cfg.DatabaseDSN != "" {
+		dbConfig := db.DefaultPostgresConfig(cfg.DatabaseDSN)
+		var err error
+		pool, err = db.NewPostgresPool(context.Background(), dbConfig)
+		if err != nil {
+			log.Printf("Warning: Failed to connect to database: %v", err)
+			log.Println("Server will continue without database")
+		} else {
+			log.Println("Successfully connected to PostgreSQL")
+		}
+	}
+
 	metricService := service.New(metricsRepository)
-	metricHandler := handler.New(metricService)
+	metricHandler := handler.New(metricService, pool)
 
 	return &Server{
 		address:     cfg.Address,
@@ -62,6 +79,7 @@ func New(cfg *config.ServerConfig) *Server {
 		handlers:    metricHandler,
 		fileStorage: fileStorage,
 		repository:  metricsRepository,
+		dbPool:      pool,
 	}
 }
 
@@ -139,6 +157,12 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		s.cancelFunc()
 	}
 
+	// Закрываем пул соединений
+	if s.dbPool != nil {
+		log.Println("Closing database connection pool...")
+		s.dbPool.Close()
+	}
+
 	// Сохраняем метрики перед выходом
 	log.Println("Saving metrics before shutdown...")
 	if err := s.saveMetrics(); err != nil {
@@ -172,6 +196,7 @@ func (s *Server) setupRoutes() chi.Router {
 	r.Use(middleware.RequestID)
 	r.Use(custommiddleware.ZapLoggerMiddleware(logger))
 
+	r.Get("/ping", s.handlers.PingDB)
 	// Роуты с проверкой статуса
 	r.Post("/update", s.wrapWithSyncSmart(s.handlers.UpdateMetricsJSON))
 	r.Post("/value", s.handlers.GetMetricJSON)

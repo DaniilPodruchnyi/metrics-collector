@@ -90,7 +90,7 @@ func TestUpdateMetrics(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			repo := repository.New()
 			svc := service.New(repo)
-			handler := New(svc)
+			handler := New(svc, nil)
 			router := setupRouter(handler)
 
 			url := "/update/" + tt.metricType + "/" + tt.metricName + "/" + tt.metricVal
@@ -115,7 +115,7 @@ func TestUpdateMetrics(t *testing.T) {
 func TestGetMetricValue(t *testing.T) {
 	repo := repository.New()
 	svc := service.New(repo)
-	handler := New(svc)
+	handler := New(svc, nil)
 	router := setupRouter(handler)
 
 	// Подготовка данных
@@ -187,7 +187,7 @@ func TestGetMetricValue(t *testing.T) {
 func TestGetAllMetricsHTML(t *testing.T) {
 	repo := repository.New()
 	svc := service.New(repo)
-	handler := New(svc)
+	handler := New(svc, nil)
 	router := setupRouter(handler)
 
 	// Подготовка данных
@@ -231,7 +231,7 @@ func TestGetAllMetricsHTML(t *testing.T) {
 func TestGetAllMetricsHTML_Empty(t *testing.T) {
 	repo := repository.New()
 	svc := service.New(repo)
-	handler := New(svc)
+	handler := New(svc, nil)
 	router := setupRouter(handler)
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -339,7 +339,7 @@ func TestUpdateMetricsJSON(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			repo := repository.New()
 			svc := service.New(repo)
-			handler := New(svc)
+			handler := New(svc, nil)
 			router := setupRouter(handler)
 
 			buf := new(bytes.Buffer)
@@ -373,7 +373,7 @@ func TestUpdateMetricsJSON(t *testing.T) {
 func TestUpdateMetricsJSON_InvalidJSON(t *testing.T) {
 	repo := repository.New()
 	svc := service.New(repo)
-	handler := New(svc)
+	handler := New(svc, nil)
 	router := setupRouter(handler)
 
 	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader("invalid json"))
@@ -396,7 +396,7 @@ func TestUpdateMetricsJSON_InvalidJSON(t *testing.T) {
 func TestGetMetricJSON(t *testing.T) {
 	repo := repository.New()
 	svc := service.New(repo)
-	handler := New(svc)
+	handler := New(svc, nil)
 	router := setupRouter(handler)
 
 	// Подготовка метрик
@@ -497,7 +497,7 @@ func TestGetMetricJSON(t *testing.T) {
 func TestGetMetricJSON_InvalidJSON(t *testing.T) {
 	repo := repository.New()
 	svc := service.New(repo)
-	handler := New(svc)
+	handler := New(svc, nil)
 	router := setupRouter(handler)
 
 	req := httptest.NewRequest(http.MethodPost, "/value", strings.NewReader("invalid json"))
@@ -520,7 +520,7 @@ func TestGetMetricJSON_InvalidJSON(t *testing.T) {
 func TestCounterIncrement(t *testing.T) {
 	repo := repository.New()
 	svc := service.New(repo)
-	handler := New(svc)
+	handler := New(svc, nil)
 	router := setupRouter(handler)
 
 	// Первое обновление
@@ -583,7 +583,7 @@ func TestCounterIncrement(t *testing.T) {
 func TestGaugeOverwrite(t *testing.T) {
 	repo := repository.New()
 	svc := service.New(repo)
-	handler := New(svc)
+	handler := New(svc, nil)
 	router := setupRouter(handler)
 
 	// Первое обновление
