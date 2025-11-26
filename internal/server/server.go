@@ -213,6 +213,9 @@ func (s *Server) setupRoutes() chi.Router {
 	r.Use(middleware.RequestID)
 	r.Use(custommiddleware.ZapLoggerMiddleware(logger))
 
+	// Batch endpoint
+	r.Post("/updates", s.handlers.UpdateMetricsBatch)
+
 	r.Post("/update", s.wrapWithSyncSmart(s.handlers.UpdateMetricsJSON))
 	r.Post("/value", s.handlers.GetMetricJSON)
 	r.Post("/update/{type}/{name}/{value}", s.wrapWithSyncSmart(s.handlers.UpdateMetrics))
