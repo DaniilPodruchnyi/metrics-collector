@@ -15,6 +15,7 @@ import (
 
 	"github.com/DaniilPodruchnyi/metrics-collector/internal/config"
 	"github.com/DaniilPodruchnyi/metrics-collector/internal/model"
+	"github.com/DaniilPodruchnyi/metrics-collector/internal/retry"
 )
 
 // Список gauge-метрик из runtime
@@ -129,7 +130,7 @@ func (a *Agent) updateRuntimeMetrics(ms *runtime.MemStats) {
 	a.metrics["TotalAlloc"].Gauge = float64(ms.TotalAlloc)
 }
 
-// sendMetrics отправляет все метрики на сервер батчем
+// sendMetrics отправляет все метрики на сервер батчем с retry
 func (a *Agent) sendMetrics() {
 	// Собираем все метрики в batch
 	batch := make([]model.Metrics, 0, len(a.metrics))
@@ -156,9 +157,16 @@ func (a *Agent) sendMetrics() {
 		return
 	}
 
-	// Пытаемся отправить batch
-	if err := a.sendMetricsBatch(batch); err != nil {
-		log.Printf("Failed to send metrics batch: %v", err)
+	// Конфигурация retry
+	retryCfg := retry.DefaultConfig()
+
+	// Пытаемся отправить batch с retry
+	err := retry.Do(func() error {
+		return a.sendMetricsBatch(batch)
+	}, retryCfg)
+
+	if err != nil {
+		log.Printf("Failed to send metrics batch after %d attempts: %v", retryCfg.MaxAttempts+1, err)
 
 		// Fallback: отправляем по одной (для обратной совместимости)
 		log.Println("Falling back to single metric sending...")
@@ -166,8 +174,13 @@ func (a *Agent) sendMetrics() {
 		errorCount := 0
 
 		for name, metric := range a.metrics {
-			if err := a.sendMetric(name, metric); err != nil {
-				log.Printf("Failed to send metric %s: %v", name, err)
+			// Retry для каждой метрики
+			err := retry.Do(func() error {
+				return a.sendMetric(name, metric)
+			}, retryCfg)
+
+			if err != nil {
+				log.Printf("Failed to send metric %s after retries: %v", name, err)
 				errorCount++
 			} else {
 				successCount++
