@@ -13,14 +13,16 @@ var (
 	ErrInvalidMetricType   = errors.New("invalid metric type")
 	ErrInvalidCounterValue = errors.New("invalid counter value format")
 	ErrInvalidGaugeValue   = errors.New("invalid gauge value format")
+	ErrMetricNotFound      = errors.New("metric not found")
+	ErrStorageFailure      = errors.New("storage operation failed")
 )
 
 // MetricsRepository определяет интерфейс для работы с хранилищем метрик
 type MetricRepository interface {
-	Store(metric *model.Metrics)
-	Get(name string) (*model.Metrics, bool)
-	GetAll() map[string]*model.Metrics
-	LoadData(data map[string]*model.Metrics)
+	Store(metric *model.Metrics) error
+	Get(name string) (*model.Metrics, bool, error)
+	GetAll() (map[string]*model.Metrics, error)
+	LoadData(data map[string]*model.Metrics) error
 }
 
 // BatchMetricRepository расширяет интерфейс для batch операций
@@ -66,13 +68,18 @@ func (s *MetricService) updateCounter(name, value string) error {
 			ErrInvalidCounterValue, value, err)
 	}
 
-	existing, exists := s.repo.Get(name)
+	existing, exists, err := s.repo.Get(name)
+	if err != nil {
+		return fmt.Errorf("%w: failed to get metric: %w", ErrStorageFailure, err)
+	}
 
 	if exists && existing.MType == model.Counter && existing.Delta != nil {
 		// Увеличиваем существующее значение counter
 		newDelta := *existing.Delta + delta
 		existing.Delta = &newDelta
-		s.repo.Store(existing)
+		if err := s.repo.Store(existing); err != nil {
+			return fmt.Errorf("%w: failed to store metric: %w", ErrStorageFailure, err)
+		}
 	} else {
 		// Создаем новую counter метрику
 		metric := &model.Metrics{
@@ -80,7 +87,9 @@ func (s *MetricService) updateCounter(name, value string) error {
 			MType: model.Counter,
 			Delta: &delta,
 		}
-		s.repo.Store(metric)
+		if err := s.repo.Store(metric); err != nil {
+			return fmt.Errorf("%w: failed to store metric: %w", ErrStorageFailure, err)
+		}
 	}
 
 	return nil
@@ -94,14 +103,19 @@ func (s *MetricService) updateGauge(name, value string) error {
 			ErrInvalidGaugeValue, value, err)
 	}
 
-	existing, exists := s.repo.Get(name)
+	existing, exists, err := s.repo.Get(name)
+	if err != nil {
+		return fmt.Errorf("%w: failed to get metric: %w", ErrStorageFailure, err)
+	}
 
 	if exists {
 		// Обновляем существующую метрику
 		existing.MType = model.Gauge
 		existing.Value = &gaugeValue
-		existing.Delta = nil // Очищаем Delta для gauge
-		s.repo.Store(existing)
+		existing.Delta = nil
+		if err := s.repo.Store(existing); err != nil {
+			return fmt.Errorf("%w: failed to store metric: %w", ErrStorageFailure, err)
+		}
 	} else {
 		// Создаем новую gauge метрику
 		metric := &model.Metrics{
@@ -109,7 +123,9 @@ func (s *MetricService) updateGauge(name, value string) error {
 			MType: model.Gauge,
 			Value: &gaugeValue,
 		}
-		s.repo.Store(metric)
+		if err := s.repo.Store(metric); err != nil {
+			return fmt.Errorf("%w: failed to store metric: %w", ErrStorageFailure, err)
+		}
 	}
 
 	return nil
@@ -117,12 +133,20 @@ func (s *MetricService) updateGauge(name, value string) error {
 
 // GetMetric возвращает метрику по имени
 func (s *MetricService) GetMetric(name string) (*model.Metrics, bool) {
-	return s.repo.Get(name)
+	metric, exists, err := s.repo.Get(name)
+	if err != nil {
+		return nil, false
+	}
+	return metric, exists
 }
 
 // GetAllMetrics возвращает все метрики
 func (s *MetricService) GetAllMetrics() map[string]*model.Metrics {
-	return s.repo.GetAll()
+	metrics, err := s.repo.GetAll()
+	if err != nil {
+		return make(map[string]*model.Metrics)
+	}
+	return metrics
 }
 
 // UpdateMetricsBatch обновляет множество метрик за один вызов
@@ -136,8 +160,14 @@ func (s *MetricService) UpdateMetricsBatch(metrics []model.Metrics) error {
 	for _, m := range metrics {
 		var valueStr string
 		if m.MType == model.Counter {
+			if m.Delta == nil {
+				return fmt.Errorf("missing delta for counter metric %s", m.ID)
+			}
 			valueStr = strconv.FormatInt(*m.Delta, 10)
 		} else {
+			if m.Value == nil {
+				return fmt.Errorf("missing value for gauge metric %s", m.ID)
+			}
 			valueStr = strconv.FormatFloat(*m.Value, 'g', -1, 64)
 		}
 

@@ -52,17 +52,17 @@ func isRetryableDBError(err error) bool {
 }
 
 // Store сохраняет метрику в БД с retry
-func (r *PostgresRepository) Store(metric *model.Metrics) {
+func (r *PostgresRepository) Store(metric *model.Metrics) error {
 	retryCfg := retry.DefaultConfig()
 
-	err := retry.DoWithContext(context.Background(), func(ctx context.Context) error {
-		return r.storeWithContext(ctx, metric)
+	return retry.DoWithContext(context.Background(), func(ctx context.Context) error {
+		err := r.storeWithContext(ctx, metric)
+		// Проверяем, нужно ли делать retry
+		if err != nil && !isRetryableDBError(err) {
+			return nil // Не делаем retry для non-retriable ошибок
+		}
+		return err
 	}, retryCfg)
-
-	if err != nil {
-		// В продакшене лучше возвращать ошибку
-		fmt.Printf("Failed to store metric %s after retries: %v\n", metric.ID, err)
-	}
 }
 
 // storeWithContext выполняет сохранение с контекстом
@@ -89,32 +89,39 @@ func (r *PostgresRepository) storeWithContext(ctx context.Context, metric *model
 		time.Now(),
 	)
 
-	if err != nil && isRetryableDBError(err) {
-		return err // Вернем ошибку для retry
-	}
-
 	return err
 }
 
 // Get возвращает метрику по имени с retry
-func (r *PostgresRepository) Get(name string) (*model.Metrics, bool) {
+func (r *PostgresRepository) Get(name string) (*model.Metrics, bool, error) {
 	var metric *model.Metrics
 	var found bool
+	var finalErr error
 
 	retryCfg := retry.DefaultConfig()
 
 	err := retry.DoWithContext(context.Background(), func(ctx context.Context) error {
 		var err error
 		metric, found, err = r.getWithContext(ctx, name)
+
+		// Проверяем, нужно ли делать retry
+		if err != nil && !isRetryableDBError(err) {
+			finalErr = err
+			return nil // Не делаем retry для non-retriable ошибок
+		}
+
 		return err
 	}, retryCfg)
 
 	if err != nil {
-		fmt.Printf("Failed to get metric %s: %v\n", name, err)
-		return nil, false
+		return nil, false, err
 	}
 
-	return metric, found
+	if finalErr != nil {
+		return nil, false, finalErr
+	}
+
+	return metric, found, nil
 }
 
 // getWithContext выполняет получение с контекстом
@@ -140,34 +147,41 @@ func (r *PostgresRepository) getWithContext(ctx context.Context, name string) (*
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, false, nil
 		}
-		if isRetryableDBError(err) {
-			return nil, false, err // Вернем для retry
-		}
-		fmt.Printf("Failed to get metric %s: %v\n", name, err)
-		return nil, false, nil
+		return nil, false, err
 	}
 
 	return &metric, true, nil
 }
 
 // GetAll возвращает все метрики с retry
-func (r *PostgresRepository) GetAll() map[string]*model.Metrics {
+func (r *PostgresRepository) GetAll() (map[string]*model.Metrics, error) {
 	var result map[string]*model.Metrics
+	var finalErr error
 
 	retryCfg := retry.DefaultConfig()
 
 	err := retry.DoWithContext(context.Background(), func(ctx context.Context) error {
 		var err error
 		result, err = r.getAllWithContext(ctx)
+
+		// Проверяем, нужно ли делать retry
+		if err != nil && !isRetryableDBError(err) {
+			finalErr = err
+			return nil // Не делаем retry для non-retriable ошибок
+		}
+
 		return err
 	}, retryCfg)
 
 	if err != nil {
-		fmt.Printf("Failed to get all metrics: %v\n", err)
-		return make(map[string]*model.Metrics)
+		return make(map[string]*model.Metrics), err
 	}
 
-	return result
+	if finalErr != nil {
+		return make(map[string]*model.Metrics), finalErr
+	}
+
+	return result, nil
 }
 
 // getAllWithContext выполняет получение всех метрик с контекстом
@@ -183,10 +197,7 @@ func (r *PostgresRepository) getAllWithContext(ctx context.Context) (map[string]
 
 	rows, err := r.pool.Query(ctx, query)
 	if err != nil {
-		if isRetryableDBError(err) {
-			return nil, err // Вернем для retry
-		}
-		return make(map[string]*model.Metrics), nil
+		return nil, err
 	}
 	defer rows.Close()
 
@@ -200,10 +211,13 @@ func (r *PostgresRepository) getAllWithContext(ctx context.Context) (map[string]
 			&metric.Value,
 		)
 		if err != nil {
-			fmt.Printf("Failed to scan metric: %v\n", err)
-			continue
+			return nil, err
 		}
 		result[metric.ID] = &metric
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 
 	return result, nil
@@ -218,7 +232,14 @@ func (r *PostgresRepository) StoreBatch(metrics []model.Metrics) error {
 	retryCfg := retry.DefaultConfig()
 
 	return retry.DoWithContext(context.Background(), func(ctx context.Context) error {
-		return r.storeBatchWithContext(ctx, metrics)
+		err := r.storeBatchWithContext(ctx, metrics)
+
+		// Проверяем, нужно ли делать retry
+		if err != nil && !isRetryableDBError(err) {
+			return nil // Не делаем retry для non-retriable ошибок
+		}
+
+		return err
 	}, retryCfg)
 }
 
@@ -227,20 +248,14 @@ func (r *PostgresRepository) storeBatchWithContext(ctx context.Context, metrics 
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 
-	// Начинаем транзакцию
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
-		if isRetryableDBError(err) {
-			return err // Вернем для retry
-		}
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
 	defer tx.Rollback(ctx)
 
-	// Обрабатываем каждую метрику
 	for _, metric := range metrics {
 		if metric.MType == model.Counter {
-			// Для counter: читаем и аккумулируем
 			var existingDelta int64
 			query := `SELECT COALESCE(delta, 0) FROM metrics WHERE id = $1 AND type = 'counter'`
 			err := tx.QueryRow(ctx, query, metric.ID).Scan(&existingDelta)
@@ -251,13 +266,9 @@ func (r *PostgresRepository) storeBatchWithContext(ctx context.Context, metrics 
 			} else if errors.Is(err, pgx.ErrNoRows) {
 				newDelta = *metric.Delta
 			} else {
-				if isRetryableDBError(err) {
-					return err // Вернем для retry
-				}
 				return fmt.Errorf("failed to query counter %s: %w", metric.ID, err)
 			}
 
-			// Upsert
 			upsertQuery := `
                 INSERT INTO metrics (id, type, delta, value, updated_at)
                 VALUES ($1, 'counter', $2, NULL, $3)
@@ -269,13 +280,9 @@ func (r *PostgresRepository) storeBatchWithContext(ctx context.Context, metrics 
             `
 			_, err = tx.Exec(ctx, upsertQuery, metric.ID, newDelta, time.Now())
 			if err != nil {
-				if isRetryableDBError(err) {
-					return err // Вернем для retry
-				}
 				return fmt.Errorf("failed to upsert counter %s: %w", metric.ID, err)
 			}
 		} else {
-			// Для gauge: просто перезаписываем
 			upsertQuery := `
                 INSERT INTO metrics (id, type, delta, value, updated_at)
                 VALUES ($1, 'gauge', NULL, $2, $3)
@@ -287,20 +294,58 @@ func (r *PostgresRepository) storeBatchWithContext(ctx context.Context, metrics 
             `
 			_, err := tx.Exec(ctx, upsertQuery, metric.ID, metric.Value, time.Now())
 			if err != nil {
-				if isRetryableDBError(err) {
-					return err // Вернем для retry
-				}
 				return fmt.Errorf("failed to upsert gauge %s: %w", metric.ID, err)
 			}
 		}
 	}
 
-	// Коммитим транзакцию
 	if err := tx.Commit(ctx); err != nil {
-		if isRetryableDBError(err) {
-			return err // Вернем для retry
-		}
 		return fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
+	return nil
+}
+
+// LoadData загружает данные из map в PostgreSQL
+func (r *PostgresRepository) LoadData(data map[string]*model.Metrics) error {
+	if len(data) == 0 {
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction for LoadData: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	for _, metric := range data {
+		query := `
+            INSERT INTO metrics (id, type, delta, value, updated_at)
+            VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT (id) 
+            DO UPDATE SET 
+                type = EXCLUDED.type,
+                delta = EXCLUDED.delta,
+                value = EXCLUDED.value,
+                updated_at = EXCLUDED.updated_at
+        `
+		_, err := tx.Exec(ctx, query,
+			metric.ID,
+			metric.MType,
+			metric.Delta,
+			metric.Value,
+			time.Now(),
+		)
+		if err != nil {
+			return fmt.Errorf("failed to load metric %s: %w", metric.ID, err)
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("failed to commit LoadData transaction: %w", err)
 	}
 
 	return nil
@@ -311,24 +356,13 @@ func (r *PostgresRepository) Ping(ctx context.Context) error {
 	retryCfg := retry.DefaultConfig()
 
 	return retry.DoWithContext(ctx, func(ctx context.Context) error {
-		return r.pool.Ping(ctx)
+		err := r.pool.Ping(ctx)
+
+		// Проверяем, нужно ли делать retry
+		if err != nil && !isRetryableDBError(err) {
+			return nil // Не делаем retry для non-retriable ошибок
+		}
+
+		return err
 	}, retryCfg)
-}
-
-// LoadData не используется для PostgreSQL (данные уже в БД)
-// Метод существует для совместимости с интерфейсом MetricRepository
-func (r *PostgresRepository) LoadData(data map[string]*model.Metrics) {
-	// Для PostgreSQL эта операция не имеет смысла, так как данные персистентны в БД
-	// Если нужно загрузить данные из map в БД, можно реализовать bulk insert:
-
-	if len(data) == 0 {
-		return
-	}
-
-	_, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	// Можно реализовать bulk insert если потребуется
-	// Пока просто игнорируем - данные уже должны быть в БД
-	fmt.Printf("LoadData called for PostgreSQL repository with %d metrics (ignored)\n", len(data))
 }
