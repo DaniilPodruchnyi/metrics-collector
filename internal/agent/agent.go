@@ -15,6 +15,7 @@ import (
 
 	"github.com/DaniilPodruchnyi/metrics-collector/internal/config"
 	"github.com/DaniilPodruchnyi/metrics-collector/internal/model"
+	"github.com/DaniilPodruchnyi/metrics-collector/internal/retry"
 )
 
 // Список gauge-метрик из runtime
@@ -129,7 +130,49 @@ func (a *Agent) updateRuntimeMetrics(ms *runtime.MemStats) {
 	a.metrics["TotalAlloc"].Gauge = float64(ms.TotalAlloc)
 }
 
-// sendMetrics отправляет все метрики на сервер батчем
+// isHTTPRetryable проверяет, является ли HTTP статус код retriable
+func isHTTPRetryable(statusCode int) bool {
+	// 5xx - server errors (retriable)
+	if statusCode >= 500 && statusCode < 600 {
+		return true
+	}
+
+	// 429 - Too Many Requests (retriable)
+	if statusCode == 429 {
+		return true
+	}
+
+	// 408 - Request Timeout (retriable)
+	if statusCode == 408 {
+		return true
+	}
+
+	// 4xx - client errors (NOT retriable, кроме указанных выше)
+	// 2xx, 3xx - успех и редиректы (NOT retriable)
+	return false
+}
+
+// isRetryableError проверяет, является ли ошибка retriable
+func (a *Agent) isRetryableError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	errStr := err.Error()
+
+	// Проверяем HTTP статус коды
+	// Формат ошибки: "server responded with status XXX"
+	var statusCode int
+	n, _ := fmt.Sscanf(errStr, "server responded with status %d", &statusCode)
+	if n == 1 {
+		return isHTTPRetryable(statusCode)
+	}
+
+	// Проверяем сетевые ошибки через retry utility
+	return retry.IsRetryable(err)
+}
+
+// sendMetrics отправляет все метрики на сервер батчем с retry
 func (a *Agent) sendMetrics() {
 	// Собираем все метрики в batch
 	batch := make([]model.Metrics, 0, len(a.metrics))
@@ -156,9 +199,24 @@ func (a *Agent) sendMetrics() {
 		return
 	}
 
-	// Пытаемся отправить batch
-	if err := a.sendMetricsBatch(batch); err != nil {
-		log.Printf("Failed to send metrics batch: %v", err)
+	// Конфигурация retry
+	retryCfg := retry.DefaultConfig()
+
+	// Пытаемся отправить batch с retry
+	err := retry.Do(func() error {
+		err := a.sendMetricsBatch(batch)
+
+		// Проверяем, стоит ли делать retry
+		if err != nil && !a.isRetryableError(err) {
+			log.Printf("Non-retriable error, skipping retry: %v", err)
+			return nil // Возвращаем nil чтобы остановить retry
+		}
+
+		return err
+	}, retryCfg)
+
+	if err != nil {
+		log.Printf("Failed to send metrics batch after %d attempts: %v", retryCfg.MaxAttempts+1, err)
 
 		// Fallback: отправляем по одной (для обратной совместимости)
 		log.Println("Falling back to single metric sending...")
@@ -166,8 +224,21 @@ func (a *Agent) sendMetrics() {
 		errorCount := 0
 
 		for name, metric := range a.metrics {
-			if err := a.sendMetric(name, metric); err != nil {
-				log.Printf("Failed to send metric %s: %v", name, err)
+			// Retry для каждой метрики
+			err := retry.Do(func() error {
+				err := a.sendMetric(name, metric)
+
+				// Проверяем retriable
+				if err != nil && !a.isRetryableError(err) {
+					log.Printf("Non-retriable error for metric %s, skipping retry: %v", name, err)
+					return nil // Останавливаем retry для non-retriable
+				}
+
+				return err
+			}, retryCfg)
+
+			if err != nil {
+				log.Printf("Failed to send metric %s after retries: %v", name, err)
 				errorCount++
 			} else {
 				successCount++
@@ -274,7 +345,6 @@ func (a *Agent) sendMetric(name string, metric *MetricValue) error {
 func (a *Agent) buildMetricURL(name string, metric *MetricValue) string {
 	switch metric.Type {
 	case "gauge":
-		// Используем 'g' для компактного формата без лишних нулей
 		valueStr := strconv.FormatFloat(metric.Gauge, 'g', -1, 64)
 		return fmt.Sprintf("%s/update/gauge/%s/%s", a.config.GetServerURL(), name, valueStr)
 	case "counter":
@@ -311,15 +381,12 @@ func (a *Agent) GetMetric(name string) (*MetricValue, bool) {
 }
 
 // SendMetricJSON отправляет метрику на сервер в формате JSON с gzip сжатием
-// (Вспомогательная функция, можно использовать отдельно)
 func SendMetricJSON(serverURL string, metric model.Metrics) error {
-	// Сериализуем метрику в JSON
 	data, err := json.Marshal(metric)
 	if err != nil {
 		return fmt.Errorf("failed to marshal metric: %w", err)
 	}
 
-	// Сжимаем данные
 	var buf bytes.Buffer
 	gz := gzip.NewWriter(&buf)
 	if _, err := gz.Write(data); err != nil {
@@ -329,18 +396,15 @@ func SendMetricJSON(serverURL string, metric model.Metrics) error {
 		return fmt.Errorf("failed to close gzip writer: %w", err)
 	}
 
-	// Создаем HTTP запрос
 	req, err := http.NewRequest(http.MethodPost, serverURL+"/update", &buf)
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
 
-	// Устанавливаем заголовки
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Content-Encoding", "gzip")
 	req.Header.Set("Accept-Encoding", "gzip")
 
-	// Отправляем запрос
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -348,7 +412,6 @@ func SendMetricJSON(serverURL string, metric model.Metrics) error {
 	}
 	defer resp.Body.Close()
 
-	// Проверяем статус ответа
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("server returned status %d: %s", resp.StatusCode, string(body))
@@ -363,13 +426,11 @@ func SendMetricsJSONBatch(serverURL string, metrics []model.Metrics) error {
 		return nil
 	}
 
-	// Сериализуем весь массив
 	data, err := json.Marshal(metrics)
 	if err != nil {
 		return fmt.Errorf("failed to marshal metrics batch: %w", err)
 	}
 
-	// Сжимаем
 	var buf bytes.Buffer
 	gz := gzip.NewWriter(&buf)
 	if _, err := gz.Write(data); err != nil {
@@ -379,7 +440,6 @@ func SendMetricsJSONBatch(serverURL string, metrics []model.Metrics) error {
 		return fmt.Errorf("failed to close gzip writer: %w", err)
 	}
 
-	// Отправляем на /updates
 	req, err := http.NewRequest(http.MethodPost, serverURL+"/updates", &buf)
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
