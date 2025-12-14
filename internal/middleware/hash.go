@@ -2,9 +2,11 @@ package middleware
 
 import (
 	"bytes"
+	"compress/gzip"
 	"io"
 	"log"
 	"net/http"
+	"strings"
 
 	"github.com/DaniilPodruchnyi/metrics-collector/internal/security"
 )
@@ -27,24 +29,45 @@ func HashVerificationMiddleware(key string) func(http.Handler) http.Handler {
 				return
 			}
 
-			// Восстанавливаем тело для следующих обработчиков
+			// Распаковываем gzip если есть
+			var originalBody []byte
+			if strings.Contains(r.Header.Get("Content-Encoding"), "gzip") {
+				gz, err := gzip.NewReader(bytes.NewReader(body))
+				if err != nil {
+					log.Printf("Failed to create gzip reader: %v", err)
+					http.Error(w, "Failed to decompress request", http.StatusBadRequest)
+					return
+				}
+				defer gz.Close()
+
+				originalBody, err = io.ReadAll(gz)
+				if err != nil {
+					log.Printf("Failed to decompress request body: %v", err)
+					http.Error(w, "Failed to decompress request", http.StatusBadRequest)
+					return
+				}
+			} else {
+				originalBody = body
+			}
+
+			// Восстанавливаем тело для следующих обработчиков (сжатое)
 			r.Body = io.NopCloser(bytes.NewReader(body))
 
 			// Получаем хеш из заголовка
 			receivedHash := r.Header.Get("HashSHA256")
 
-			// Если хеш не передан, но ключ задан - это ошибка
+			// Если хеш не передан, но ключ задан - пропускаем для обратной совместимости
 			if receivedHash == "" {
 				log.Println("Hash not provided in request, but key is configured")
-				// Можно пропустить для обратной совместимости или отклонить
 				next.ServeHTTP(w, r)
 				return
 			}
 
-			// Проверяем подпись
-			if !security.VerifyHMAC(body, key, receivedHash) {
-				log.Printf("Hash verification failed. Expected vs Received: %s vs %s",
-					security.ComputeHMAC(body, key), receivedHash)
+			// Проверяем подпись НЕСЖАТЫХ данных
+			if !security.VerifyHMAC(originalBody, key, receivedHash) {
+				expectedHash := security.ComputeHMAC(originalBody, key)
+				log.Printf("Hash verification failed. Expected: %s, Received: %s",
+					expectedHash[:16]+"...", receivedHash[:16]+"...")
 				http.Error(w, "Invalid signature", http.StatusBadRequest)
 				return
 			}

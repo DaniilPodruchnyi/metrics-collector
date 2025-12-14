@@ -265,7 +265,14 @@ func (a *Agent) sendMetricsBatch(metrics []model.Metrics) error {
 		return fmt.Errorf("failed to marshal metrics: %w", err)
 	}
 
-	// Сжимаем данные gzip
+	// Подписываем НЕСЖАТЫЕ данные
+	var hash string
+	if a.config.HasKey() {
+		hash = security.ComputeHMAC(buf, a.config.Key)
+		log.Printf("Request signed with hash (before compression): %s", hash[:16]+"...")
+	}
+
+	// Сжимаем данные gzip ПОСЛЕ подписи
 	var gzipBuf bytes.Buffer
 	gz := gzip.NewWriter(&gzipBuf)
 	if _, err := gz.Write(buf); err != nil {
@@ -275,11 +282,8 @@ func (a *Agent) sendMetricsBatch(metrics []model.Metrics) error {
 		return fmt.Errorf("failed to close gzip writer: %w", err)
 	}
 
-	// Получаем сжатые данные для подписи
-	compressedData := gzipBuf.Bytes()
-
 	// Создаем запрос
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(compressedData))
+	req, err := http.NewRequest(http.MethodPost, url, &gzipBuf)
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
@@ -289,11 +293,9 @@ func (a *Agent) sendMetricsBatch(metrics []model.Metrics) error {
 	req.Header.Set("Accept-Encoding", "gzip")
 	req.Header.Set("User-Agent", "metrics-agent/2.0")
 
-	// Подписываем запрос, если ключ задан
+	// Добавляем хеш в заголовок
 	if a.config.HasKey() {
-		hash := security.ComputeHMAC(compressedData, a.config.Key)
 		req.Header.Set("HashSHA256", hash)
-		log.Printf("Request signed with hash: %s", hash[:16]+"...")
 	}
 
 	// Отправляем
