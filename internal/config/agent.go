@@ -15,6 +15,7 @@ type AgentConfig struct {
 	ServerAddress  string
 	PollInterval   time.Duration
 	ReportInterval time.Duration
+	Key            string // Ключ для подписи запросов
 }
 
 func ParseAgentConfig() (*AgentConfig, error) {
@@ -28,6 +29,7 @@ func ParseAgentConfig() (*AgentConfig, error) {
 		serverAddrFlag = flag.String("a", "", "server address")
 		pollFlag       = flag.Int("p", defaultPoll, "poll interval in seconds")
 		reportFlag     = flag.Int("r", defaultReport, "report interval in seconds")
+		keyFlag        = flag.String("k", "", "key for signing requests (SHA256)")
 	)
 	flag.Parse()
 
@@ -37,11 +39,14 @@ func ParseAgentConfig() (*AgentConfig, error) {
 	pollInterval := getEnvOrFlagInt("POLL_INTERVAL", *pollFlag, defaultPoll)
 	// 3. REPORT_INTERVAL
 	reportInterval := getEnvOrFlagInt("REPORT_INTERVAL", *reportFlag, defaultReport)
+	// 4. KEY
+	key := getEnvOrFlagString("KEY", *keyFlag, "")
 
 	config := &AgentConfig{
 		ServerAddress:  normalizeServerAddress(serverAddr),
 		PollInterval:   time.Duration(pollInterval) * time.Second,
 		ReportInterval: time.Duration(reportInterval) * time.Second,
+		Key:            key,
 	}
 
 	if err := config.validate(); err != nil {
@@ -110,8 +115,12 @@ func normalizeServerAddress(addr string) string {
 
 // String возвращает строковое представление конфигурации
 func (c *AgentConfig) String() string {
-	return fmt.Sprintf("Agent{Server: %s, Poll: %v, Report: %v}",
-		c.ServerAddress, c.PollInterval, c.ReportInterval)
+	keyInfo := "none"
+	if c.Key != "" {
+		keyInfo = "configured"
+	}
+	return fmt.Sprintf("Agent{Server: %s, Poll: %v, Report: %v, Key: %s}",
+		c.ServerAddress, c.PollInterval, c.ReportInterval, keyInfo)
 }
 
 // LogConfig выводит конфигурацию в лог
@@ -122,4 +131,9 @@ func (c *AgentConfig) LogConfig() {
 // GetServerURL возвращает URL сервера для метрик
 func (c *AgentConfig) GetServerURL() string {
 	return c.ServerAddress
+}
+
+// HasKey возвращает true, если ключ для подписи установлен
+func (c *AgentConfig) HasKey() bool {
+	return c.Key != ""
 }

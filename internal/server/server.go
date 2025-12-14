@@ -201,17 +201,24 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	return nil
 }
 
-// setupRoutes остается без изменений
 func (s *Server) setupRoutes() chi.Router {
 	r := chi.NewRouter()
 	logger, _ := zap.NewProduction()
 
 	r.Use(middleware.StripSlashes)
+	// ВАЖНО: GzipMiddleware должен быть ПЕРЕД HashVerificationMiddleware
 	r.Use(custommiddleware.GzipMiddleware)
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.RequestID)
 	r.Use(custommiddleware.ZapLoggerMiddleware(logger))
+
+	// Hash middleware - применяются после gzip декомпрессии
+	if s.config.HasKey() {
+		log.Println("Hash verification and signing enabled")
+		r.Use(custommiddleware.HashVerificationMiddleware(s.config.Key))
+		r.Use(custommiddleware.HashSigningMiddleware(s.config.Key))
+	}
 
 	// Batch endpoint - добавляем оба варианта (с и без slash)
 	r.Post("/updates", s.wrapWithSyncSmart(s.handlers.UpdateMetricsBatch))

@@ -16,6 +16,7 @@ type ServerConfig struct {
 	FileStoragePath string
 	Restore         bool
 	DatabaseDSN     string
+	Key             string // Ключ для проверки подписи
 }
 
 func ParseServerConfig() (*ServerConfig, error) {
@@ -32,6 +33,7 @@ func ParseServerConfig() (*ServerConfig, error) {
 		fileFlag     = flag.String("f", "", "file storage path")
 		restoreFlag  = flag.Bool("r", defaultRestore, "restore from file on startup")
 		databaseFlag = flag.String("d", "", "database DSN")
+		keyFlag      = flag.String("k", "", "key for signing responses (SHA256)")
 	)
 	flag.Parse()
 
@@ -40,6 +42,7 @@ func ParseServerConfig() (*ServerConfig, error) {
 	storeInterval := getEnvOrFlagInt("STORE_INTERVAL", *intervalFlag, defaultInterval)
 	fileStoragePath := getEnvOrFlagString("FILE_STORAGE_PATH", *fileFlag, defaultStoragePath)
 	databaseDSN := getEnvOrFlagString("DATABASE_DSN", *databaseFlag, "")
+	key := getEnvOrFlagString("KEY", *keyFlag, "")
 
 	// Передаем "r" как имя флага для Lookup
 	restore := getEnvOrFlagBool("RESTORE", "r", *restoreFlag, defaultRestore)
@@ -50,6 +53,7 @@ func ParseServerConfig() (*ServerConfig, error) {
 		FileStoragePath: fileStoragePath,
 		Restore:         restore,
 		DatabaseDSN:     databaseDSN,
+		Key:             key,
 	}
 
 	if err := config.validate(); err != nil {
@@ -98,8 +102,12 @@ func (c *ServerConfig) validate() error {
 
 // String возвращает строковое представление конфигурации
 func (c *ServerConfig) String() string {
-	return fmt.Sprintf("Server{Address: %s, StoreInterval: %v, FilePath: %s, Restore: %v}",
-		c.Address, c.StoreInterval, c.FileStoragePath, c.Restore)
+	keyInfo := "none"
+	if c.Key != "" {
+		keyInfo = "configured"
+	}
+	return fmt.Sprintf("Server{Address: %s, StoreInterval: %v, FilePath: %s, Restore: %v, Key: %s}",
+		c.Address, c.StoreInterval, c.FileStoragePath, c.Restore, keyInfo)
 }
 
 // LogConfig выводит конфигурацию в лог
@@ -110,4 +118,9 @@ func (c *ServerConfig) LogConfig() {
 // IsSyncMode возвращает true, если запись синхронная (interval = 0)
 func (c *ServerConfig) IsSyncMode() bool {
 	return c.StoreInterval == 0
+}
+
+// HasKey возвращает true, если ключ для подписи установлен
+func (c *ServerConfig) HasKey() bool {
+	return c.Key != ""
 }

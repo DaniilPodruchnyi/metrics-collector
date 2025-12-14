@@ -16,6 +16,7 @@ import (
 	"github.com/DaniilPodruchnyi/metrics-collector/internal/config"
 	"github.com/DaniilPodruchnyi/metrics-collector/internal/model"
 	"github.com/DaniilPodruchnyi/metrics-collector/internal/retry"
+	"github.com/DaniilPodruchnyi/metrics-collector/internal/security"
 )
 
 // Список gauge-метрик из runtime
@@ -71,6 +72,9 @@ func (a *Agent) Run() {
 	defer reportTicker.Stop()
 
 	log.Println("Agent started")
+	if a.config.HasKey() {
+		log.Println("Request signing enabled")
+	}
 
 	for {
 		select {
@@ -204,19 +208,16 @@ func (a *Agent) sendMetrics() {
 
 	// Пытаемся отправить batch с retry
 	err := retry.Do(func() error {
-		err := a.sendMetricsBatch(batch)
-
-		// Проверяем, стоит ли делать retry
-		if err != nil && !a.isRetryableError(err) {
-			log.Printf("Non-retriable error, skipping retry: %v", err)
-			return nil // Возвращаем nil чтобы остановить retry
-		}
-
-		return err
+		return a.sendMetricsBatch(batch)
 	}, retryCfg)
 
 	if err != nil {
-		log.Printf("Failed to send metrics batch after %d attempts: %v", retryCfg.MaxAttempts+1, err)
+		// Проверяем, является ли ошибка retriable
+		if a.isRetryableError(err) {
+			log.Printf("Failed to send metrics batch after %d attempts: %v", retryCfg.MaxAttempts+1, err)
+		} else {
+			log.Printf("Non-retriable error sending metrics: %v", err)
+		}
 
 		// Fallback: отправляем по одной (для обратной совместимости)
 		log.Println("Falling back to single metric sending...")
@@ -226,19 +227,11 @@ func (a *Agent) sendMetrics() {
 		for name, metric := range a.metrics {
 			// Retry для каждой метрики
 			err := retry.Do(func() error {
-				err := a.sendMetric(name, metric)
-
-				// Проверяем retriable
-				if err != nil && !a.isRetryableError(err) {
-					log.Printf("Non-retriable error for metric %s, skipping retry: %v", name, err)
-					return nil // Останавливаем retry для non-retriable
-				}
-
-				return err
+				return a.sendMetric(name, metric)
 			}, retryCfg)
 
 			if err != nil {
-				log.Printf("Failed to send metric %s after retries: %v", name, err)
+				log.Printf("Failed to send metric %s: %v", name, err)
 				errorCount++
 			} else {
 				successCount++
@@ -261,7 +254,14 @@ func (a *Agent) sendMetricsBatch(metrics []model.Metrics) error {
 		return fmt.Errorf("failed to marshal metrics: %w", err)
 	}
 
-	// Сжимаем данные gzip
+	// Подписываем НЕСЖАТЫЕ данные
+	var hash string
+	if a.config.HasKey() {
+		hash = security.ComputeHMAC(buf, a.config.Key)
+		log.Printf("Request signed with hash (before compression): %s", hash[:16]+"...")
+	}
+
+	// Сжимаем данные gzip ПОСЛЕ подписи
 	var gzipBuf bytes.Buffer
 	gz := gzip.NewWriter(&gzipBuf)
 	if _, err := gz.Write(buf); err != nil {
@@ -282,6 +282,11 @@ func (a *Agent) sendMetricsBatch(metrics []model.Metrics) error {
 	req.Header.Set("Accept-Encoding", "gzip")
 	req.Header.Set("User-Agent", "metrics-agent/2.0")
 
+	// Добавляем хеш в заголовок
+	if a.config.HasKey() {
+		req.Header.Set("HashSHA256", hash)
+	}
+
 	// Отправляем
 	resp, err := a.client.Do(req)
 	if err != nil {
@@ -289,9 +294,25 @@ func (a *Agent) sendMetricsBatch(metrics []model.Metrics) error {
 	}
 	defer resp.Body.Close()
 
+	// Читаем тело ответа
+	responseBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response body: %w", err)
+	}
+
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("server responded with status %d: %s", resp.StatusCode, string(body))
+		return fmt.Errorf("server responded with status %d: %s", resp.StatusCode, string(responseBody))
+	}
+
+	// Проверяем подпись ответа, если ключ задан
+	if a.config.HasKey() {
+		receivedHash := resp.Header.Get("HashSHA256")
+		if receivedHash != "" {
+			if !security.VerifyHMAC(responseBody, a.config.Key, receivedHash) {
+				return fmt.Errorf("response signature verification failed")
+			}
+			log.Println("Response signature verified successfully")
+		}
 	}
 
 	return nil
@@ -327,6 +348,12 @@ func (a *Agent) sendMetric(name string, metric *MetricValue) error {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "metrics-agent/2.0")
+
+	// Подписываем запрос, если ключ задан
+	if a.config.HasKey() {
+		hash := security.ComputeHMAC(buf, a.config.Key)
+		req.Header.Set("HashSHA256", hash)
+	}
 
 	resp, err := a.client.Do(req)
 	if err != nil {
