@@ -201,7 +201,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	return nil
 }
 
-// setupRoutes остается без изменений
+// setupRoutes с добавленными middleware для hash verification и signing
 func (s *Server) setupRoutes() chi.Router {
 	r := chi.NewRouter()
 	logger, _ := zap.NewProduction()
@@ -212,6 +212,13 @@ func (s *Server) setupRoutes() chi.Router {
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.RequestID)
 	r.Use(custommiddleware.ZapLoggerMiddleware(logger))
+
+	// Добавляем middleware для проверки и подписи хешей
+	if s.config.HasKey() {
+		log.Printf("Hash verification and signing enabled")
+		r.Use(custommiddleware.HashVerificationMiddleware(s.config.Key))
+		r.Use(custommiddleware.HashSigningMiddleware(s.config.Key))
+	}
 
 	// Batch endpoint - добавляем оба варианта (с и без slash)
 	r.Post("/updates", s.wrapWithSyncSmart(s.handlers.UpdateMetricsBatch))

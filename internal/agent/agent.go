@@ -16,6 +16,7 @@ import (
 	"github.com/DaniilPodruchnyi/metrics-collector/internal/config"
 	"github.com/DaniilPodruchnyi/metrics-collector/internal/model"
 	"github.com/DaniilPodruchnyi/metrics-collector/internal/retry"
+	"github.com/DaniilPodruchnyi/metrics-collector/internal/security"
 )
 
 // Список gauge-метрик из runtime
@@ -71,6 +72,9 @@ func (a *Agent) Run() {
 	defer reportTicker.Stop()
 
 	log.Println("Agent started")
+	if a.config.HasKey() {
+		log.Println("Request signing enabled")
+	}
 
 	for {
 		select {
@@ -271,8 +275,11 @@ func (a *Agent) sendMetricsBatch(metrics []model.Metrics) error {
 		return fmt.Errorf("failed to close gzip writer: %w", err)
 	}
 
+	// Получаем сжатые данные для подписи
+	compressedData := gzipBuf.Bytes()
+
 	// Создаем запрос
-	req, err := http.NewRequest(http.MethodPost, url, &gzipBuf)
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(compressedData))
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
@@ -282,6 +289,13 @@ func (a *Agent) sendMetricsBatch(metrics []model.Metrics) error {
 	req.Header.Set("Accept-Encoding", "gzip")
 	req.Header.Set("User-Agent", "metrics-agent/2.0")
 
+	// Подписываем запрос, если ключ задан
+	if a.config.HasKey() {
+		hash := security.ComputeHMAC(compressedData, a.config.Key)
+		req.Header.Set("HashSHA256", hash)
+		log.Printf("Request signed with hash: %s", hash[:16]+"...")
+	}
+
 	// Отправляем
 	resp, err := a.client.Do(req)
 	if err != nil {
@@ -289,9 +303,25 @@ func (a *Agent) sendMetricsBatch(metrics []model.Metrics) error {
 	}
 	defer resp.Body.Close()
 
+	// Читаем тело ответа
+	responseBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response body: %w", err)
+	}
+
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("server responded with status %d: %s", resp.StatusCode, string(body))
+		return fmt.Errorf("server responded with status %d: %s", resp.StatusCode, string(responseBody))
+	}
+
+	// Проверяем подпись ответа, если ключ задан
+	if a.config.HasKey() {
+		receivedHash := resp.Header.Get("HashSHA256")
+		if receivedHash != "" {
+			if !security.VerifyHMAC(responseBody, a.config.Key, receivedHash) {
+				return fmt.Errorf("response signature verification failed")
+			}
+			log.Println("Response signature verified successfully")
+		}
 	}
 
 	return nil
@@ -327,6 +357,12 @@ func (a *Agent) sendMetric(name string, metric *MetricValue) error {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "metrics-agent/2.0")
+
+	// Подписываем запрос, если ключ задан
+	if a.config.HasKey() {
+		hash := security.ComputeHMAC(buf, a.config.Key)
+		req.Header.Set("HashSHA256", hash)
+	}
 
 	resp, err := a.client.Do(req)
 	if err != nil {
