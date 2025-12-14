@@ -3,6 +3,7 @@ package agent
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,23 +11,16 @@ import (
 	"math/rand"
 	"net/http"
 	"runtime"
-	"strconv"
+	"sync"
 	"time"
 
 	"github.com/DaniilPodruchnyi/metrics-collector/internal/config"
 	"github.com/DaniilPodruchnyi/metrics-collector/internal/model"
 	"github.com/DaniilPodruchnyi/metrics-collector/internal/retry"
 	"github.com/DaniilPodruchnyi/metrics-collector/internal/security"
+	"github.com/shirou/gopsutil/v4/cpu"
+	"github.com/shirou/gopsutil/v4/mem"
 )
-
-// Список gauge-метрик из runtime
-var runtimeGaugeMetrics = []string{
-	"Alloc", "BuckHashSys", "Frees", "GCCPUFraction", "GCSys", "HeapAlloc",
-	"HeapIdle", "HeapInuse", "HeapObjects", "HeapReleased", "HeapSys",
-	"LastGC", "Lookups", "MCacheInuse", "MCacheSys", "MSpanInuse",
-	"MSpanSys", "Mallocs", "NextGC", "NumForcedGC", "NumGC", "OtherSys",
-	"PauseTotalNs", "StackInuse", "StackSys", "Sys", "TotalAlloc",
-}
 
 // MetricValue — структура для хранения значения метрики
 type MetricValue struct {
@@ -39,21 +33,38 @@ type MetricValue struct {
 type Agent struct {
 	config  *config.AgentConfig
 	metrics map[string]*MetricValue
+	mu      sync.RWMutex // Мьютекс для thread-safe доступа к метрикам
 	client  *http.Client
+	jobs    chan model.Metrics // Канал для worker pool
+	wg      sync.WaitGroup     // WaitGroup для graceful shutdown
 }
 
 // New создает новый агент с конфигурацией
 func New(cfg *config.AgentConfig) *Agent {
 	metrics := make(map[string]*MetricValue)
 
-	// Инициализируем все gauge-метрики из runtime
+	// Инициализируем runtime метрики
+	runtimeGaugeMetrics := []string{
+		"Alloc", "BuckHashSys", "Frees", "GCCPUFraction", "GCSys", "HeapAlloc",
+		"HeapIdle", "HeapInuse", "HeapObjects", "HeapReleased", "HeapSys",
+		"LastGC", "Lookups", "MCacheInuse", "MCacheSys", "MSpanInuse",
+		"MSpanSys", "Mallocs", "NextGC", "NumForcedGC", "NumGC", "OtherSys",
+		"PauseTotalNs", "StackInuse", "StackSys", "Sys", "TotalAlloc",
+	}
+
 	for _, name := range runtimeGaugeMetrics {
 		metrics[name] = &MetricValue{Type: "gauge"}
 	}
 
-	// Добавляем специальные метрики
+	// Специальные метрики
 	metrics["PollCount"] = &MetricValue{Type: "counter", Counter: 0}
 	metrics["RandomValue"] = &MetricValue{Type: "gauge", Gauge: rand.Float64()}
+
+	// Gopsutil метрики (инициализация)
+	metrics["TotalMemory"] = &MetricValue{Type: "gauge"}
+	metrics["FreeMemory"] = &MetricValue{Type: "gauge"}
+
+	// CPU метрики будут добавлены динамически
 
 	return &Agent{
 		config:  cfg,
@@ -61,37 +72,145 @@ func New(cfg *config.AgentConfig) *Agent {
 		client: &http.Client{
 			Timeout: 10 * time.Second,
 		},
+		jobs: make(chan model.Metrics, 100), // Буферизованный канал
 	}
 }
 
-// Run запускает основной цикл агента
+// Run запускает основной цикл агента с несколькими горутинами
 func (a *Agent) Run() {
-	pollTicker := time.NewTicker(a.config.PollInterval)
-	reportTicker := time.NewTicker(a.config.ReportInterval)
-	defer pollTicker.Stop()
-	defer reportTicker.Stop()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	log.Println("Agent started")
 	if a.config.HasKey() {
 		log.Println("Request signing enabled")
 	}
+	log.Printf("Worker pool size: %d", a.config.RateLimit)
+
+	// 1. Запускаем worker pool (N воркеров)
+	for i := 0; i < a.config.RateLimit; i++ {
+		a.wg.Add(1)
+		go a.worker(ctx, i+1)
+	}
+
+	// 2. Запускаем сборщик runtime метрик
+	a.wg.Add(1)
+	go a.runtimeCollector(ctx)
+
+	// 3. Запускаем сборщик gopsutil метрик
+	a.wg.Add(1)
+	go a.gopsutilCollector(ctx)
+
+	// 4. Запускаем отправщик метрик (producer)
+	a.wg.Add(1)
+	go a.metricsReporter(ctx)
+
+	// Ждем завершения всех горутин
+	a.wg.Wait()
+	log.Println("Agent stopped")
+}
+
+// runtimeCollector собирает runtime метрики каждые PollInterval
+func (a *Agent) runtimeCollector(ctx context.Context) {
+	defer a.wg.Done()
+
+	ticker := time.NewTicker(a.config.PollInterval)
+	defer ticker.Stop()
+
+	log.Println("Runtime collector started")
 
 	for {
 		select {
-		case <-pollTicker.C:
-			a.collectMetrics()
-
-		case <-reportTicker.C:
-			log.Println("Sending metrics to server...")
-			a.sendMetrics()
+		case <-ctx.Done():
+			log.Println("Runtime collector stopped")
+			return
+		case <-ticker.C:
+			a.collectRuntimeMetrics()
 		}
 	}
 }
 
-// collectMetrics собирает метрики из runtime
-func (a *Agent) collectMetrics() {
+// gopsutilCollector собирает метрики через gopsutil каждые PollInterval
+func (a *Agent) gopsutilCollector(ctx context.Context) {
+	defer a.wg.Done()
+
+	ticker := time.NewTicker(a.config.PollInterval)
+	defer ticker.Stop()
+
+	log.Println("Gopsutil collector started")
+
+	for {
+		select {
+		case <-ctx.Done():
+			log.Println("Gopsutil collector stopped")
+			return
+		case <-ticker.C:
+			a.collectGopsutilMetrics()
+		}
+	}
+}
+
+// metricsReporter отправляет метрики в канал jobs каждые ReportInterval
+func (a *Agent) metricsReporter(ctx context.Context) {
+	defer a.wg.Done()
+	defer close(a.jobs) // Закрываем канал при выходе
+
+	ticker := time.NewTicker(a.config.ReportInterval)
+	defer ticker.Stop()
+
+	log.Println("Metrics reporter started")
+
+	for {
+		select {
+		case <-ctx.Done():
+			log.Println("Metrics reporter stopped")
+			return
+		case <-ticker.C:
+			log.Println("Sending metrics to worker pool...")
+			a.publishMetrics()
+		}
+	}
+}
+
+// worker обрабатывает метрики из канала jobs
+func (a *Agent) worker(ctx context.Context, id int) {
+	defer a.wg.Done()
+
+	log.Printf("Worker %d started", id)
+
+	for {
+		select {
+		case <-ctx.Done():
+			log.Printf("Worker %d stopped", id)
+			return
+		case metric, ok := <-a.jobs:
+			if !ok {
+				log.Printf("Worker %d: channel closed", id)
+				return
+			}
+
+			// Отправляем метрику с retry
+			retryCfg := retry.DefaultConfig()
+			err := retry.Do(func() error {
+				return a.sendSingleMetric(metric)
+			}, retryCfg)
+
+			if err != nil {
+				log.Printf("Worker %d: failed to send metric %s: %v", id, metric.ID, err)
+			} else {
+				log.Printf("Worker %d: successfully sent metric %s", id, metric.ID)
+			}
+		}
+	}
+}
+
+// collectRuntimeMetrics собирает метрики из runtime
+func (a *Agent) collectRuntimeMetrics() {
 	var ms runtime.MemStats
 	runtime.ReadMemStats(&ms)
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
 
 	// Обновляем счётчик опросов
 	a.metrics["PollCount"].Counter++
@@ -100,11 +219,6 @@ func (a *Agent) collectMetrics() {
 	a.metrics["RandomValue"].Gauge = rand.Float64()
 
 	// Обновляем все runtime-метрики
-	a.updateRuntimeMetrics(&ms)
-}
-
-// updateRuntimeMetrics обновляет все метрики из runtime.MemStats
-func (a *Agent) updateRuntimeMetrics(ms *runtime.MemStats) {
 	a.metrics["Alloc"].Gauge = float64(ms.Alloc)
 	a.metrics["BuckHashSys"].Gauge = float64(ms.BuckHashSys)
 	a.metrics["Frees"].Gauge = float64(ms.Frees)
@@ -134,53 +248,42 @@ func (a *Agent) updateRuntimeMetrics(ms *runtime.MemStats) {
 	a.metrics["TotalAlloc"].Gauge = float64(ms.TotalAlloc)
 }
 
-// isHTTPRetryable проверяет, является ли HTTP статус код retriable
-func isHTTPRetryable(statusCode int) bool {
-	// 5xx - server errors (retriable)
-	if statusCode >= 500 && statusCode < 600 {
-		return true
+// collectGopsutilMetrics собирает метрики через gopsutil
+func (a *Agent) collectGopsutilMetrics() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	// Собираем информацию о памяти
+	if v, err := mem.VirtualMemory(); err == nil {
+		a.metrics["TotalMemory"].Gauge = float64(v.Total)
+		a.metrics["FreeMemory"].Gauge = float64(v.Free)
+	} else {
+		log.Printf("Failed to get memory info: %v", err)
 	}
 
-	// 429 - Too Many Requests (retriable)
-	if statusCode == 429 {
-		return true
-	}
+	// Собираем информацию о CPU (утилизация каждого ядра)
+	if percentages, err := cpu.Percent(0, true); err == nil {
+		for i, percent := range percentages {
+			metricName := fmt.Sprintf("CPUutilization%d", i+1)
 
-	// 408 - Request Timeout (retriable)
-	if statusCode == 408 {
-		return true
-	}
+			// Инициализируем метрику если её нет
+			if _, exists := a.metrics[metricName]; !exists {
+				a.metrics[metricName] = &MetricValue{Type: "gauge"}
+			}
 
-	// 4xx - client errors (NOT retriable, кроме указанных выше)
-	// 2xx, 3xx - успех и редиректы (NOT retriable)
-	return false
+			a.metrics[metricName].Gauge = percent
+		}
+	} else {
+		log.Printf("Failed to get CPU info: %v", err)
+	}
 }
 
-// isRetryableError проверяет, является ли ошибка retriable
-func (a *Agent) isRetryableError(err error) bool {
-	if err == nil {
-		return false
-	}
+// publishMetrics отправляет все метрики в канал jobs
+func (a *Agent) publishMetrics() {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 
-	errStr := err.Error()
-
-	// Проверяем HTTP статус коды
-	// Формат ошибки: "server responded with status XXX"
-	var statusCode int
-	n, _ := fmt.Sscanf(errStr, "server responded with status %d", &statusCode)
-	if n == 1 {
-		return isHTTPRetryable(statusCode)
-	}
-
-	// Проверяем сетевые ошибки через retry utility
-	return retry.IsRetryable(err)
-}
-
-// sendMetrics отправляет все метрики на сервер батчем с retry
-func (a *Agent) sendMetrics() {
-	// Собираем все метрики в batch
-	batch := make([]model.Metrics, 0, len(a.metrics))
-
+	count := 0
 	for name, metric := range a.metrics {
 		m := model.Metrics{
 			ID:    name,
@@ -194,74 +297,35 @@ func (a *Agent) sendMetrics() {
 			m.Value = &metric.Gauge
 		}
 
-		batch = append(batch, m)
-	}
-
-	// Не отправляем пустые батчи
-	if len(batch) == 0 {
-		log.Println("No metrics to send")
-		return
-	}
-
-	// Конфигурация retry
-	retryCfg := retry.DefaultConfig()
-
-	// Пытаемся отправить batch с retry
-	err := retry.Do(func() error {
-		return a.sendMetricsBatch(batch)
-	}, retryCfg)
-
-	if err != nil {
-		// Проверяем, является ли ошибка retriable
-		if a.isRetryableError(err) {
-			log.Printf("Failed to send metrics batch after %d attempts: %v", retryCfg.MaxAttempts+1, err)
-		} else {
-			log.Printf("Non-retriable error sending metrics: %v", err)
+		// Отправляем в канал (non-blocking)
+		select {
+		case a.jobs <- m:
+			count++
+		default:
+			log.Printf("Warning: jobs channel is full, skipping metric %s", name)
 		}
-
-		// Fallback: отправляем по одной (для обратной совместимости)
-		log.Println("Falling back to single metric sending...")
-		successCount := 0
-		errorCount := 0
-
-		for name, metric := range a.metrics {
-			// Retry для каждой метрики
-			err := retry.Do(func() error {
-				return a.sendMetric(name, metric)
-			}, retryCfg)
-
-			if err != nil {
-				log.Printf("Failed to send metric %s: %v", name, err)
-				errorCount++
-			} else {
-				successCount++
-			}
-		}
-
-		log.Printf("Fallback complete: %d success, %d errors", successCount, errorCount)
-	} else {
-		log.Printf("Successfully sent batch of %d metrics", len(batch))
 	}
+
+	log.Printf("Published %d metrics to worker pool", count)
 }
 
-// sendMetricsBatch отправляет метрики батчем на /updates
-func (a *Agent) sendMetricsBatch(metrics []model.Metrics) error {
-	url := a.config.GetServerURL() + "/updates"
+// sendSingleMetric отправляет одну метрику на сервер
+func (a *Agent) sendSingleMetric(metric model.Metrics) error {
+	url := a.config.GetServerURL() + "/update"
 
 	// Сериализуем в JSON
-	buf, err := json.Marshal(metrics)
+	buf, err := json.Marshal(metric)
 	if err != nil {
-		return fmt.Errorf("failed to marshal metrics: %w", err)
+		return fmt.Errorf("failed to marshal metric: %w", err)
 	}
 
 	// Подписываем НЕСЖАТЫЕ данные
 	var hash string
 	if a.config.HasKey() {
 		hash = security.ComputeHMAC(buf, a.config.Key)
-		log.Printf("Request signed with hash (before compression): %s", hash[:16]+"...")
 	}
 
-	// Сжимаем данные gzip ПОСЛЕ подписи
+	// Сжимаем данные gzip
 	var gzipBuf bytes.Buffer
 	gz := gzip.NewWriter(&gzipBuf)
 	if _, err := gz.Write(buf); err != nil {
@@ -280,9 +344,9 @@ func (a *Agent) sendMetricsBatch(metrics []model.Metrics) error {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Content-Encoding", "gzip")
 	req.Header.Set("Accept-Encoding", "gzip")
-	req.Header.Set("User-Agent", "metrics-agent/2.0")
+	req.Header.Set("User-Agent", "metrics-agent/3.0")
 
-	// Добавляем хеш в заголовок
+	// Добавляем хеш
 	if a.config.HasKey() {
 		req.Header.Set("HashSHA256", hash)
 	}
@@ -304,85 +368,24 @@ func (a *Agent) sendMetricsBatch(metrics []model.Metrics) error {
 		return fmt.Errorf("server responded with status %d: %s", resp.StatusCode, string(responseBody))
 	}
 
-	// Проверяем подпись ответа, если ключ задан
+	// Проверяем подпись ответа
 	if a.config.HasKey() {
 		receivedHash := resp.Header.Get("HashSHA256")
 		if receivedHash != "" {
 			if !security.VerifyHMAC(responseBody, a.config.Key, receivedHash) {
 				return fmt.Errorf("response signature verification failed")
 			}
-			log.Println("Response signature verified successfully")
 		}
 	}
 
 	return nil
 }
 
-// sendMetric отправляет одну метрику на сервер (fallback для обратной совместимости)
-func (a *Agent) sendMetric(name string, metric *MetricValue) error {
-	url := a.config.GetServerURL() + "/update"
-
-	var jsonMetric struct {
-		ID    string   `json:"id"`
-		MType string   `json:"type"`
-		Delta *int64   `json:"delta,omitempty"`
-		Value *float64 `json:"value,omitempty"`
-	}
-	jsonMetric.ID = name
-	jsonMetric.MType = metric.Type
-	switch metric.Type {
-	case "counter":
-		jsonMetric.Delta = &metric.Counter
-	case "gauge":
-		jsonMetric.Value = &metric.Gauge
-	}
-
-	buf, err := json.Marshal(jsonMetric)
-	if err != nil {
-		return err
-	}
-
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(buf))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "metrics-agent/2.0")
-
-	// Подписываем запрос, если ключ задан
-	if a.config.HasKey() {
-		hash := security.ComputeHMAC(buf, a.config.Key)
-		req.Header.Set("HashSHA256", hash)
-	}
-
-	resp, err := a.client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("server responded with status %d", resp.StatusCode)
-	}
-
-	return nil
-}
-
-// buildMetricURL строит URL для отправки метрики (legacy)
-func (a *Agent) buildMetricURL(name string, metric *MetricValue) string {
-	switch metric.Type {
-	case "gauge":
-		valueStr := strconv.FormatFloat(metric.Gauge, 'g', -1, 64)
-		return fmt.Sprintf("%s/update/gauge/%s/%s", a.config.GetServerURL(), name, valueStr)
-	case "counter":
-		return fmt.Sprintf("%s/update/counter/%s/%d", a.config.GetServerURL(), name, metric.Counter)
-	default:
-		return ""
-	}
-}
-
 // GetMetrics возвращает копию текущих метрик (для тестирования)
 func (a *Agent) GetMetrics() map[string]*MetricValue {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+
 	result := make(map[string]*MetricValue)
 	for name, metric := range a.metrics {
 		result[name] = &MetricValue{
@@ -396,6 +399,9 @@ func (a *Agent) GetMetrics() map[string]*MetricValue {
 
 // GetMetric возвращает значение конкретной метрики (для тестирования)
 func (a *Agent) GetMetric(name string) (*MetricValue, bool) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+
 	metric, exists := a.metrics[name]
 	if !exists {
 		return nil, false
@@ -405,88 +411,4 @@ func (a *Agent) GetMetric(name string) (*MetricValue, bool) {
 		Gauge:   metric.Gauge,
 		Counter: metric.Counter,
 	}, true
-}
-
-// SendMetricJSON отправляет метрику на сервер в формате JSON с gzip сжатием
-func SendMetricJSON(serverURL string, metric model.Metrics) error {
-	data, err := json.Marshal(metric)
-	if err != nil {
-		return fmt.Errorf("failed to marshal metric: %w", err)
-	}
-
-	var buf bytes.Buffer
-	gz := gzip.NewWriter(&buf)
-	if _, err := gz.Write(data); err != nil {
-		return fmt.Errorf("failed to compress data: %w", err)
-	}
-	if err := gz.Close(); err != nil {
-		return fmt.Errorf("failed to close gzip writer: %w", err)
-	}
-
-	req, err := http.NewRequest(http.MethodPost, serverURL+"/update", &buf)
-	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Content-Encoding", "gzip")
-	req.Header.Set("Accept-Encoding", "gzip")
-
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to send request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("server returned status %d: %s", resp.StatusCode, string(body))
-	}
-
-	return nil
-}
-
-// SendMetricsJSONBatch отправляет несколько метрик батчем на /updates
-func SendMetricsJSONBatch(serverURL string, metrics []model.Metrics) error {
-	if len(metrics) == 0 {
-		return nil
-	}
-
-	data, err := json.Marshal(metrics)
-	if err != nil {
-		return fmt.Errorf("failed to marshal metrics batch: %w", err)
-	}
-
-	var buf bytes.Buffer
-	gz := gzip.NewWriter(&buf)
-	if _, err := gz.Write(data); err != nil {
-		return fmt.Errorf("failed to compress data: %w", err)
-	}
-	if err := gz.Close(); err != nil {
-		return fmt.Errorf("failed to close gzip writer: %w", err)
-	}
-
-	req, err := http.NewRequest(http.MethodPost, serverURL+"/updates", &buf)
-	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Content-Encoding", "gzip")
-	req.Header.Set("Accept-Encoding", "gzip")
-
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to send request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("server returned status %d: %s", resp.StatusCode, string(body))
-	}
-
-	return nil
 }
