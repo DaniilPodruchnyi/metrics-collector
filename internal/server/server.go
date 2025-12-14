@@ -201,21 +201,21 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	return nil
 }
 
-// setupRoutes с добавленными middleware для hash verification и signing
 func (s *Server) setupRoutes() chi.Router {
 	r := chi.NewRouter()
 	logger, _ := zap.NewProduction()
 
 	r.Use(middleware.StripSlashes)
+	// ВАЖНО: GzipMiddleware должен быть ПЕРЕД HashVerificationMiddleware
 	r.Use(custommiddleware.GzipMiddleware)
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.RequestID)
 	r.Use(custommiddleware.ZapLoggerMiddleware(logger))
 
-	// Добавляем middleware для проверки и подписи хешей
+	// Hash middleware - применяются после gzip декомпрессии
 	if s.config.HasKey() {
-		log.Printf("Hash verification and signing enabled")
+		log.Println("Hash verification and signing enabled")
 		r.Use(custommiddleware.HashVerificationMiddleware(s.config.Key))
 		r.Use(custommiddleware.HashSigningMiddleware(s.config.Key))
 	}

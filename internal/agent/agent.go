@@ -208,19 +208,16 @@ func (a *Agent) sendMetrics() {
 
 	// Пытаемся отправить batch с retry
 	err := retry.Do(func() error {
-		err := a.sendMetricsBatch(batch)
-
-		// Проверяем, стоит ли делать retry
-		if err != nil && !a.isRetryableError(err) {
-			log.Printf("Non-retriable error, skipping retry: %v", err)
-			return nil // Возвращаем nil чтобы остановить retry
-		}
-
-		return err
+		return a.sendMetricsBatch(batch)
 	}, retryCfg)
 
 	if err != nil {
-		log.Printf("Failed to send metrics batch after %d attempts: %v", retryCfg.MaxAttempts+1, err)
+		// Проверяем, является ли ошибка retriable
+		if a.isRetryableError(err) {
+			log.Printf("Failed to send metrics batch after %d attempts: %v", retryCfg.MaxAttempts+1, err)
+		} else {
+			log.Printf("Non-retriable error sending metrics: %v", err)
+		}
 
 		// Fallback: отправляем по одной (для обратной совместимости)
 		log.Println("Falling back to single metric sending...")
@@ -230,19 +227,11 @@ func (a *Agent) sendMetrics() {
 		for name, metric := range a.metrics {
 			// Retry для каждой метрики
 			err := retry.Do(func() error {
-				err := a.sendMetric(name, metric)
-
-				// Проверяем retriable
-				if err != nil && !a.isRetryableError(err) {
-					log.Printf("Non-retriable error for metric %s, skipping retry: %v", name, err)
-					return nil // Останавливаем retry для non-retriable
-				}
-
-				return err
+				return a.sendMetric(name, metric)
 			}, retryCfg)
 
 			if err != nil {
-				log.Printf("Failed to send metric %s after retries: %v", name, err)
+				log.Printf("Failed to send metric %s: %v", name, err)
 				errorCount++
 			} else {
 				successCount++

@@ -2,16 +2,15 @@ package middleware
 
 import (
 	"bytes"
-	"compress/gzip"
 	"io"
 	"log"
 	"net/http"
-	"strings"
 
 	"github.com/DaniilPodruchnyi/metrics-collector/internal/security"
 )
 
 // HashVerificationMiddleware проверяет HMAC-SHA256 подпись запроса
+// ВАЖНО: Должен применяться ПОСЛЕ GzipMiddleware, чтобы работать с распакованными данными
 func HashVerificationMiddleware(key string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -21,7 +20,7 @@ func HashVerificationMiddleware(key string) func(http.Handler) http.Handler {
 				return
 			}
 
-			// Читаем тело запроса
+			// Читаем тело запроса (уже распакованное GzipMiddleware)
 			body, err := io.ReadAll(r.Body)
 			if err != nil {
 				log.Printf("Failed to read request body: %v", err)
@@ -29,28 +28,7 @@ func HashVerificationMiddleware(key string) func(http.Handler) http.Handler {
 				return
 			}
 
-			// Распаковываем gzip если есть
-			var originalBody []byte
-			if strings.Contains(r.Header.Get("Content-Encoding"), "gzip") {
-				gz, err := gzip.NewReader(bytes.NewReader(body))
-				if err != nil {
-					log.Printf("Failed to create gzip reader: %v", err)
-					http.Error(w, "Failed to decompress request", http.StatusBadRequest)
-					return
-				}
-				defer gz.Close()
-
-				originalBody, err = io.ReadAll(gz)
-				if err != nil {
-					log.Printf("Failed to decompress request body: %v", err)
-					http.Error(w, "Failed to decompress request", http.StatusBadRequest)
-					return
-				}
-			} else {
-				originalBody = body
-			}
-
-			// Восстанавливаем тело для следующих обработчиков (сжатое)
+			// Восстанавливаем тело для следующих обработчиков
 			r.Body = io.NopCloser(bytes.NewReader(body))
 
 			// Получаем хеш из заголовка
@@ -63,9 +41,9 @@ func HashVerificationMiddleware(key string) func(http.Handler) http.Handler {
 				return
 			}
 
-			// Проверяем подпись НЕСЖАТЫХ данных
-			if !security.VerifyHMAC(originalBody, key, receivedHash) {
-				expectedHash := security.ComputeHMAC(originalBody, key)
+			// Проверяем подпись распакованных данных
+			if !security.VerifyHMAC(body, key, receivedHash) {
+				expectedHash := security.ComputeHMAC(body, key)
 				log.Printf("Hash verification failed. Expected: %s, Received: %s",
 					expectedHash[:16]+"...", receivedHash[:16]+"...")
 				http.Error(w, "Invalid signature", http.StatusBadRequest)
@@ -97,6 +75,7 @@ func (rw *responseWriterWithHash) WriteHeader(statusCode int) {
 }
 
 // HashSigningMiddleware подписывает ответы сервера
+// ВАЖНО: Должен применяться ПОСЛЕ GzipMiddleware
 func HashSigningMiddleware(key string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
