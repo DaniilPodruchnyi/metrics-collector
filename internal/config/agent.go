@@ -16,6 +16,7 @@ type AgentConfig struct {
 	PollInterval   time.Duration
 	ReportInterval time.Duration
 	Key            string // Ключ для подписи запросов
+	RateLimit      int    // Максимальное количество одновременных запросов
 }
 
 func ParseAgentConfig() (*AgentConfig, error) {
@@ -24,12 +25,14 @@ func ParseAgentConfig() (*AgentConfig, error) {
 		defaultServerAddr = "localhost:8080"
 		defaultPoll       = 2
 		defaultReport     = 10
+		defaultRateLimit  = 3 // По умолчанию 3 одновременных запроса
 	)
 	var (
 		serverAddrFlag = flag.String("a", "", "server address")
 		pollFlag       = flag.Int("p", defaultPoll, "poll interval in seconds")
 		reportFlag     = flag.Int("r", defaultReport, "report interval in seconds")
 		keyFlag        = flag.String("k", "", "key for signing requests (SHA256)")
+		rateLimitFlag  = flag.Int("l", defaultRateLimit, "rate limit (max concurrent requests)")
 	)
 	flag.Parse()
 
@@ -41,12 +44,15 @@ func ParseAgentConfig() (*AgentConfig, error) {
 	reportInterval := getEnvOrFlagInt("REPORT_INTERVAL", *reportFlag, defaultReport)
 	// 4. KEY
 	key := getEnvOrFlagString("KEY", *keyFlag, "")
+	// 5. RATE_LIMIT
+	rateLimit := getEnvOrFlagInt("RATE_LIMIT", *rateLimitFlag, defaultRateLimit)
 
 	config := &AgentConfig{
 		ServerAddress:  normalizeServerAddress(serverAddr),
 		PollInterval:   time.Duration(pollInterval) * time.Second,
 		ReportInterval: time.Duration(reportInterval) * time.Second,
 		Key:            key,
+		RateLimit:      rateLimit,
 	}
 
 	if err := config.validate(); err != nil {
@@ -93,6 +99,10 @@ func (c *AgentConfig) validate() error {
 		return fmt.Errorf("report interval must be positive, got %v", c.ReportInterval)
 	}
 
+	if c.RateLimit <= 0 {
+		return fmt.Errorf("rate limit must be positive, got %d", c.RateLimit)
+	}
+
 	if c.PollInterval >= c.ReportInterval {
 		log.Printf("Warning: poll interval (%v) should be less than report interval (%v)",
 			c.PollInterval, c.ReportInterval)
@@ -119,8 +129,8 @@ func (c *AgentConfig) String() string {
 	if c.Key != "" {
 		keyInfo = "configured"
 	}
-	return fmt.Sprintf("Agent{Server: %s, Poll: %v, Report: %v, Key: %s}",
-		c.ServerAddress, c.PollInterval, c.ReportInterval, keyInfo)
+	return fmt.Sprintf("Agent{Server: %s, Poll: %v, Report: %v, Key: %s, RateLimit: %d}",
+		c.ServerAddress, c.PollInterval, c.ReportInterval, keyInfo, c.RateLimit)
 }
 
 // LogConfig выводит конфигурацию в лог
