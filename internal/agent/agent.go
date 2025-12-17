@@ -18,6 +18,7 @@ import (
 	"github.com/DaniilPodruchnyi/metrics-collector/internal/model"
 	"github.com/DaniilPodruchnyi/metrics-collector/internal/retry"
 	"github.com/DaniilPodruchnyi/metrics-collector/internal/security"
+	"github.com/DaniilPodruchnyi/metrics-collector/internal/workerpool"
 	"github.com/shirou/gopsutil/v4/cpu"
 	"github.com/shirou/gopsutil/v4/mem"
 )
@@ -31,12 +32,12 @@ type MetricValue struct {
 
 // Agent представляет агент сбора метрик
 type Agent struct {
-	config  *config.AgentConfig
-	metrics map[string]*MetricValue
-	mu      sync.RWMutex // Мьютекс для thread-safe доступа к метрикам
-	client  *http.Client
-	jobs    chan model.Metrics // Канал для worker pool
-	wg      sync.WaitGroup     // WaitGroup для graceful shutdown
+	config     *config.AgentConfig
+	metrics    map[string]*MetricValue
+	mu         sync.RWMutex
+	client     *http.Client
+	workerPool *workerpool.WorkerPool
+	wg         sync.WaitGroup
 }
 
 // New создает новый агент с конфигурацией
@@ -64,34 +65,36 @@ func New(cfg *config.AgentConfig) *Agent {
 	metrics["TotalMemory"] = &MetricValue{Type: "gauge"}
 	metrics["FreeMemory"] = &MetricValue{Type: "gauge"}
 
-	// CPU метрики будут добавлены динамически
-
-	return &Agent{
+	agent := &Agent{
 		config:  cfg,
 		metrics: metrics,
 		client: &http.Client{
 			Timeout: 10 * time.Second,
 		},
-		jobs: make(chan model.Metrics, 100), // Буферизованный канал
 	}
+
+	// Создаем worker pool с обработчиком метрик
+	poolConfig := workerpool.Config{
+		Workers:     cfg.RateLimit,
+		BufferSize:  100,
+		RetryConfig: retry.DefaultConfig(),
+	}
+
+	agent.workerPool = workerpool.New(poolConfig, agent.metricJobHandler)
+
+	return agent
 }
 
 // Run запускает основной цикл агента с несколькими горутинами
-func (a *Agent) Run() {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
+func (a *Agent) Run(ctx context.Context) {
 	log.Println("Agent started")
 	if a.config.HasKey() {
 		log.Println("Request signing enabled")
 	}
 	log.Printf("Worker pool size: %d", a.config.RateLimit)
 
-	// 1. Запускаем worker pool (N воркеров)
-	for i := 0; i < a.config.RateLimit; i++ {
-		a.wg.Add(1)
-		go a.worker(ctx, i+1)
-	}
+	// 1. Запускаем worker pool
+	a.workerPool.Start(ctx)
 
 	// 2. Запускаем сборщик runtime метрик
 	a.wg.Add(1)
@@ -105,9 +108,40 @@ func (a *Agent) Run() {
 	a.wg.Add(1)
 	go a.metricsReporter(ctx)
 
-	// Ждем завершения всех горутин
+	// Ждем завершения коллекторов
 	a.wg.Wait()
-	log.Println("Agent stopped")
+
+	// Останавливаем worker pool
+	a.workerPool.Stop()
+
+	log.Println("Agent stopped gracefully")
+}
+
+// Shutdown корректно останавливает агента
+func (a *Agent) Shutdown(ctx context.Context) error {
+	log.Println("Initiating agent shutdown...")
+
+	// Даем время на завершение текущих операций
+	done := make(chan struct{})
+
+	go func() {
+		// Ждем завершения коллекторов
+		a.wg.Wait()
+
+		// Останавливаем worker pool только один раз
+		a.workerPool.Stop()
+
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		log.Println("Agent shutdown completed")
+		return nil
+	case <-ctx.Done():
+		log.Println("Agent shutdown timeout exceeded")
+		return ctx.Err()
+	}
 }
 
 // runtimeCollector собирает runtime метрики каждые PollInterval
@@ -150,10 +184,9 @@ func (a *Agent) gopsutilCollector(ctx context.Context) {
 	}
 }
 
-// metricsReporter отправляет метрики в канал jobs каждые ReportInterval
+// metricsReporter отправляет метрики в worker pool каждые ReportInterval
 func (a *Agent) metricsReporter(ctx context.Context) {
 	defer a.wg.Done()
-	defer close(a.jobs) // Закрываем канал при выходе
 
 	ticker := time.NewTicker(a.config.ReportInterval)
 	defer ticker.Stop()
@@ -166,40 +199,8 @@ func (a *Agent) metricsReporter(ctx context.Context) {
 			log.Println("Metrics reporter stopped")
 			return
 		case <-ticker.C:
-			log.Println("Sending metrics to worker pool...")
+			log.Println("Publishing metrics to worker pool...")
 			a.publishMetrics()
-		}
-	}
-}
-
-// worker обрабатывает метрики из канала jobs
-func (a *Agent) worker(ctx context.Context, id int) {
-	defer a.wg.Done()
-
-	log.Printf("Worker %d started", id)
-
-	for {
-		select {
-		case <-ctx.Done():
-			log.Printf("Worker %d stopped", id)
-			return
-		case metric, ok := <-a.jobs:
-			if !ok {
-				log.Printf("Worker %d: channel closed", id)
-				return
-			}
-
-			// Отправляем метрику с retry
-			retryCfg := retry.DefaultConfig()
-			err := retry.Do(func() error {
-				return a.sendSingleMetric(metric)
-			}, retryCfg)
-
-			if err != nil {
-				log.Printf("Worker %d: failed to send metric %s: %v", id, metric.ID, err)
-			} else {
-				log.Printf("Worker %d: successfully sent metric %s", id, metric.ID)
-			}
 		}
 	}
 }
@@ -261,8 +262,8 @@ func (a *Agent) collectGopsutilMetrics() {
 		log.Printf("Failed to get memory info: %v", err)
 	}
 
-	// Собираем информацию о CPU (утилизация каждого ядра)
-	if percentages, err := cpu.Percent(0, true); err == nil {
+	// Собираем информацию о CPU с интервалом 100ms для точности
+	if percentages, err := cpu.Percent(100*time.Millisecond, true); err == nil {
 		for i, percent := range percentages {
 			metricName := fmt.Sprintf("CPUutilization%d", i+1)
 
@@ -278,12 +279,13 @@ func (a *Agent) collectGopsutilMetrics() {
 	}
 }
 
-// publishMetrics отправляет все метрики в канал jobs
+// publishMetrics отправляет все метрики в worker pool
 func (a *Agent) publishMetrics() {
 	a.mu.RLock()
-	defer a.mu.RUnlock()
 
-	count := 0
+	// Создаем копии метрик для безопасной отправки
+	metricsCopy := make([]model.Metrics, 0, len(a.metrics))
+
 	for name, metric := range a.metrics {
 		m := model.Metrics{
 			ID:    name,
@@ -292,25 +294,50 @@ func (a *Agent) publishMetrics() {
 
 		switch metric.Type {
 		case "counter":
-			m.Delta = &metric.Counter
+			// Копируем значение
+			delta := metric.Counter
+			m.Delta = &delta
 		case "gauge":
-			m.Value = &metric.Gauge
+			// Копируем значение
+			value := metric.Gauge
+			m.Value = &value
 		}
 
-		// Отправляем в канал (non-blocking)
-		select {
-		case a.jobs <- m:
+		metricsCopy = append(metricsCopy, m)
+	}
+
+	a.mu.RUnlock()
+
+	// Теперь безопасно отправляем копии в worker pool
+	count := 0
+	skipped := 0
+
+	for _, m := range metricsCopy {
+		if a.workerPool.Submit(m) {
 			count++
-		default:
-			log.Printf("Warning: jobs channel is full, skipping metric %s", name)
+		} else {
+			skipped++
 		}
 	}
 
+	if skipped > 0 {
+		log.Printf("Warning: %d metrics skipped (worker pool queue full)", skipped)
+	}
 	log.Printf("Published %d metrics to worker pool", count)
 }
 
+// metricJobHandler обрабатывает задачу отправки метрики (используется в WorkerPool)
+func (a *Agent) metricJobHandler(ctx context.Context, job workerpool.Job) error {
+	metric, ok := job.(model.Metrics)
+	if !ok {
+		return fmt.Errorf("invalid job type: expected model.Metrics")
+	}
+
+	return a.sendSingleMetric(ctx, metric)
+}
+
 // sendSingleMetric отправляет одну метрику на сервер
-func (a *Agent) sendSingleMetric(metric model.Metrics) error {
+func (a *Agent) sendSingleMetric(ctx context.Context, metric model.Metrics) error {
 	url := a.config.GetServerURL() + "/update"
 
 	// Сериализуем в JSON
@@ -335,8 +362,8 @@ func (a *Agent) sendSingleMetric(metric model.Metrics) error {
 		return fmt.Errorf("failed to close gzip writer: %w", err)
 	}
 
-	// Создаем запрос
-	req, err := http.NewRequest(http.MethodPost, url, &gzipBuf)
+	// Создаем запрос с контекстом
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, &gzipBuf)
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
@@ -351,9 +378,13 @@ func (a *Agent) sendSingleMetric(metric model.Metrics) error {
 		req.Header.Set("HashSHA256", hash)
 	}
 
-	// Отправляем
+	// Отправляем с учетом контекста
 	resp, err := a.client.Do(req)
 	if err != nil {
+		// Проверяем, не был ли запрос отменен
+		if ctx.Err() != nil {
+			return fmt.Errorf("request cancelled: %w", ctx.Err())
+		}
 		return fmt.Errorf("failed to send request: %w", err)
 	}
 	defer resp.Body.Close()

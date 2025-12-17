@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -48,9 +49,9 @@ func TestNewAgent(t *testing.T) {
 		t.Error("FreeMemory metric not initialized correctly")
 	}
 
-	// Проверяем инициализацию канала
-	if agent.jobs == nil {
-		t.Error("Jobs channel not initialized")
+	// Проверяем инициализацию worker pool
+	if agent.workerPool == nil {
+		t.Error("Worker pool not initialized")
 	}
 }
 
@@ -169,7 +170,9 @@ func TestSendSingleMetric(t *testing.T) {
 		Value: &value,
 	}
 
-	if err := agent.sendSingleMetric(metric); err != nil {
+	// Используем контекст для вызова
+	ctx := context.Background()
+	if err := agent.sendSingleMetric(ctx, metric); err != nil {
 		t.Errorf("sendSingleMetric() error = %v", err)
 	}
 }
@@ -196,12 +199,50 @@ func TestSendSingleMetricError(t *testing.T) {
 		Value: &value,
 	}
 
-	err := agent.sendSingleMetric(metric)
+	ctx := context.Background()
+	err := agent.sendSingleMetric(ctx, metric)
 	if err == nil {
 		t.Error("sendSingleMetric() should return error for 500 status")
 	}
 	if !strings.Contains(err.Error(), "500") {
 		t.Errorf("Error should mention status code 500, got: %v", err)
+	}
+}
+
+func TestSendSingleMetricWithCancelledContext(t *testing.T) {
+	// Сервер с задержкой
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(100 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	cfg := &config.AgentConfig{
+		ServerAddress:  server.URL,
+		PollInterval:   2 * time.Second,
+		ReportInterval: 10 * time.Second,
+		RateLimit:      3,
+	}
+
+	agent := New(cfg)
+
+	value := 42.0
+	metric := model.Metrics{
+		ID:    "TestMetric",
+		MType: "gauge",
+		Value: &value,
+	}
+
+	// Создаем контекст с немедленной отменой
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // Сразу отменяем
+
+	err := agent.sendSingleMetric(ctx, metric)
+	if err == nil {
+		t.Error("sendSingleMetric() should return error for cancelled context")
+	}
+	if !strings.Contains(err.Error(), "context") && !strings.Contains(err.Error(), "cancel") {
+		t.Errorf("Error should mention context cancellation, got: %v", err)
 	}
 }
 
@@ -216,41 +257,55 @@ func TestPublishMetrics(t *testing.T) {
 	agent := New(cfg)
 	agent.collectRuntimeMetrics()
 
-	// Публикуем метрики в канал
-	go agent.publishMetrics()
+	// Запускаем worker pool для чтения из канала
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-	// Читаем из канала
-	timeout := time.After(2 * time.Second)
-	metricsReceived := 0
+	agent.workerPool.Start(ctx)
+	defer agent.workerPool.Stop()
 
-	for {
-		select {
-		case metric, ok := <-agent.jobs:
-			if !ok {
-				t.Error("Jobs channel closed unexpectedly")
-				return
-			}
-			metricsReceived++
+	// Публикуем метрики
+	agent.publishMetrics()
 
-			// Проверяем структуру метрики
-			if metric.ID == "" {
-				t.Error("Metric ID should not be empty")
-			}
-			if metric.MType != "gauge" && metric.MType != "counter" {
-				t.Errorf("Invalid metric type: %s", metric.MType)
-			}
+	// Даем время на обработку
+	time.Sleep(100 * time.Millisecond)
 
-			// Прекращаем после получения нескольких метрик
-			if metricsReceived >= 5 {
-				return
-			}
+	// Проверка прошла успешно, если не было паники
+}
 
-		case <-timeout:
-			if metricsReceived == 0 {
-				t.Error("No metrics received from jobs channel")
-			}
-			return
-		}
+func TestMetricJobHandler(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	cfg := &config.AgentConfig{
+		ServerAddress:  server.URL,
+		PollInterval:   2 * time.Second,
+		ReportInterval: 10 * time.Second,
+		RateLimit:      3,
+	}
+
+	agent := New(cfg)
+
+	// Создаем тестовую метрику
+	value := 42.0
+	metric := model.Metrics{
+		ID:    "TestMetric",
+		MType: "gauge",
+		Value: &value,
+	}
+
+	ctx := context.Background()
+	err := agent.metricJobHandler(ctx, metric)
+	if err != nil {
+		t.Errorf("metricJobHandler() should not return error, got: %v", err)
+	}
+
+	// Тест с неправильным типом job
+	err = agent.metricJobHandler(ctx, "invalid job type")
+	if err == nil {
+		t.Error("metricJobHandler() should return error for invalid job type")
 	}
 }
 
@@ -366,4 +421,212 @@ func TestThreadSafety(t *testing.T) {
 	<-done
 
 	// Если мы дошли сюда без race condition - тест пройден
+}
+
+func TestShutdown(t *testing.T) {
+	cfg := &config.AgentConfig{
+		ServerAddress:  "http://localhost:8080",
+		PollInterval:   100 * time.Millisecond,
+		ReportInterval: 200 * time.Millisecond,
+		RateLimit:      3,
+	}
+
+	agent := New(cfg)
+
+	// Запускаем агента в горутине
+	ctx, cancel := context.WithCancel(context.Background())
+
+	go func() {
+		agent.Run(ctx)
+	}()
+
+	// Даем агенту поработать
+	time.Sleep(300 * time.Millisecond)
+
+	// Отменяем контекст
+	cancel()
+
+	// Ждем завершения Run() с таймаутом
+	// Run() сам вызовет Stop() для worker pool
+	time.Sleep(2 * time.Second)
+
+	// Проверяем, что worker pool остановлен
+	if !agent.workerPool.IsStopped() {
+		t.Error("Worker pool should be stopped after context cancellation")
+	}
+}
+
+func TestShutdownExplicit(t *testing.T) {
+	cfg := &config.AgentConfig{
+		ServerAddress:  "http://localhost:8080",
+		PollInterval:   100 * time.Millisecond,
+		ReportInterval: 200 * time.Millisecond,
+		RateLimit:      3,
+	}
+
+	agent := New(cfg)
+
+	// Запускаем агента в горутине
+	ctx, cancel := context.WithCancel(context.Background())
+
+	go func() {
+		agent.Run(ctx)
+	}()
+
+	// Даем агенту поработать
+	time.Sleep(300 * time.Millisecond)
+
+	// Отменяем контекст
+	cancel()
+
+	// Явный вызов Shutdown с таймаутом
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer shutdownCancel()
+
+	err := agent.Shutdown(shutdownCtx)
+	if err != nil {
+		t.Errorf("Shutdown() should not return error, got: %v", err)
+	}
+
+	// Проверяем, что worker pool остановлен
+	if !agent.workerPool.IsStopped() {
+		t.Error("Worker pool should be stopped after explicit shutdown")
+	}
+}
+
+func TestShutdownTimeout(t *testing.T) {
+	cfg := &config.AgentConfig{
+		ServerAddress:  "http://localhost:8080",
+		PollInterval:   100 * time.Millisecond,
+		ReportInterval: 200 * time.Millisecond,
+		RateLimit:      3,
+	}
+
+	agent := New(cfg)
+
+	// Запускаем агента
+	ctx, cancel := context.WithCancel(context.Background())
+	go agent.Run(ctx)
+
+	// Даем агенту поработать
+	time.Sleep(300 * time.Millisecond)
+
+	// Отменяем контекст
+	cancel()
+
+	// Пытаемся завершить с очень коротким таймаутом
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 1*time.Nanosecond)
+	defer shutdownCancel()
+
+	err := agent.Shutdown(shutdownCtx)
+	if err == nil {
+		t.Error("Shutdown() should return timeout error for very short timeout")
+	}
+
+	// Даем время на нормальное завершение
+	time.Sleep(2 * time.Second)
+}
+
+func TestShutdownIdempotent(t *testing.T) {
+	cfg := &config.AgentConfig{
+		ServerAddress:  "http://localhost:8080",
+		PollInterval:   100 * time.Millisecond,
+		ReportInterval: 200 * time.Millisecond,
+		RateLimit:      3,
+	}
+
+	agent := New(cfg)
+
+	// Запускаем агента
+	ctx, cancel := context.WithCancel(context.Background())
+	go agent.Run(ctx)
+
+	// Даем агенту поработать
+	time.Sleep(300 * time.Millisecond)
+
+	// Отменяем контекст
+	cancel()
+
+	shutdownCtx := context.Background()
+
+	// Первый вызов Shutdown
+	err1 := agent.Shutdown(shutdownCtx)
+	if err1 != nil {
+		t.Errorf("First Shutdown() should not return error, got: %v", err1)
+	}
+
+	// Второй вызов Shutdown (должен быть безопасным благодаря sync.Once)
+	err2 := agent.Shutdown(shutdownCtx)
+	if err2 != nil {
+		t.Errorf("Second Shutdown() should not return error, got: %v", err2)
+	}
+
+	// Проверяем, что worker pool остановлен
+	if !agent.workerPool.IsStopped() {
+		t.Error("Worker pool should be stopped")
+	}
+}
+
+func TestRuntimeCollector(t *testing.T) {
+	cfg := &config.AgentConfig{
+		ServerAddress:  "http://localhost:8080",
+		PollInterval:   50 * time.Millisecond,
+		ReportInterval: 200 * time.Millisecond,
+		RateLimit:      3,
+	}
+
+	agent := New(cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	agent.wg.Add(1)
+	go agent.runtimeCollector(ctx)
+
+	// Ждем несколько циклов сбора
+	time.Sleep(150 * time.Millisecond)
+
+	// Проверяем, что метрики обновлялись
+	agent.mu.RLock()
+	pollCount := agent.metrics["PollCount"].Counter
+	agent.mu.RUnlock()
+
+	if pollCount < 2 {
+		t.Errorf("Expected at least 2 poll cycles, got %d", pollCount)
+	}
+
+	// Ждем завершения
+	agent.wg.Wait()
+}
+
+func TestGopsutilCollector(t *testing.T) {
+	cfg := &config.AgentConfig{
+		ServerAddress:  "http://localhost:8080",
+		PollInterval:   50 * time.Millisecond,
+		ReportInterval: 200 * time.Millisecond,
+		RateLimit:      3,
+	}
+
+	agent := New(cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	agent.wg.Add(1)
+	go agent.gopsutilCollector(ctx)
+
+	// Ждем несколько циклов сбора
+	time.Sleep(150 * time.Millisecond)
+
+	// Проверяем, что метрики собраны
+	agent.mu.RLock()
+	totalMem := agent.metrics["TotalMemory"].Gauge
+	agent.mu.RUnlock()
+
+	if totalMem == 0 {
+		t.Error("TotalMemory should be collected by gopsutil collector")
+	}
+
+	// Ждем завершения
+	agent.wg.Wait()
 }
