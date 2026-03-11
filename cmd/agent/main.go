@@ -55,7 +55,7 @@ func main() {
 
 	// Канал для приема OS сигналов
 	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM, syscall.SIGINT)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM, syscall.SIGINT, syscall.SIGQUIT)
 
 	// Запускаем агента в отдельной горутине
 	done := make(chan struct{})
