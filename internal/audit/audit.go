@@ -46,4 +46,3 @@ func (s *Subject) Notify(ctx context.Context, e Event) {
 		o.OnAudit(ctx, e)
 	}
 }
-

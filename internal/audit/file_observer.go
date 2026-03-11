@@ -44,4 +44,3 @@ func (o *FileObserver) OnAudit(_ context.Context, e Event) {
 		return
 	}
 }
-

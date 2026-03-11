@@ -6,4 +6,3 @@ type Event struct {
 	Metrics   []string `json:"metrics"`
 	IPAddress string   `json:"ip_address"`
 }
-

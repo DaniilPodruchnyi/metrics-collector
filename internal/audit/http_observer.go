@@ -52,4 +52,3 @@ func (o *HTTPObserver) OnAudit(_ context.Context, e Event) {
 		return
 	}
 }
-
