@@ -16,6 +16,7 @@ import (
 // AgentConfig содержит конфигурацию агента
 type AgentConfig struct {
 	ServerAddress  string
+	GRPCAddress    string
 	PollInterval   time.Duration
 	ReportInterval time.Duration
 	Key            string // Ключ для подписи запросов
@@ -26,6 +27,7 @@ type AgentConfig struct {
 // agentConfigFile описывает формат JSON-конфигурации агента
 type agentConfigFile struct {
 	Address        string `json:"address"`
+	GRPCAddress    string `json:"grpc_address"`
 	ReportInterval string `json:"report_interval"`
 	PollInterval   string `json:"poll_interval"`
 	Key            string `json:"key"`
@@ -44,6 +46,7 @@ func ParseAgentConfig() (*AgentConfig, error) {
 	var (
 		configPath    string
 		serverAddrFlag = flag.String("a", "", "server address")
+		grpcAddrFlag   = flag.String("grpc-address", "", "gRPC server address")
 		pollFlag       = flag.Int("p", defaultPoll, "poll interval in seconds")
 		reportFlag     = flag.Int("r", defaultReport, "report interval in seconds")
 		keyFlag        = flag.String("k", "", "key for signing requests (SHA256)")
@@ -84,6 +87,17 @@ func ParseAgentConfig() (*AgentConfig, error) {
 		serverAddr = env
 	} else if f := flag.Lookup("a"); f != nil && f.Value.String() != f.DefValue {
 		serverAddr = *serverAddrFlag
+	}
+
+	// GRPC_ADDRESS
+	grpcAddr := ""
+	if fileCfg.GRPCAddress != "" {
+		grpcAddr = fileCfg.GRPCAddress
+	}
+	if env := os.Getenv("GRPC_ADDRESS"); env != "" {
+		grpcAddr = env
+	} else if f := flag.Lookup("grpc-address"); f != nil && f.Value.String() != f.DefValue {
+		grpcAddr = *grpcAddrFlag
 	}
 
 	// POLL_INTERVAL (секунды в env/флагах, duration в JSON)
@@ -153,6 +167,7 @@ func ParseAgentConfig() (*AgentConfig, error) {
 
 	config := &AgentConfig{
 		ServerAddress:  normalizeServerAddress(serverAddr),
+		GRPCAddress:    grpcAddr,
 		PollInterval:   time.Duration(pollSeconds) * time.Second,
 		ReportInterval: time.Duration(reportSeconds) * time.Second,
 		Key:            key,

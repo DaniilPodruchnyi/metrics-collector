@@ -4,14 +4,16 @@ import (
 	"context"
 	"crypto/rsa"
 	"log"
-	"net/http"
 	"net"
+	"net/http"
 	"time"
 
 	"github.com/DaniilPodruchnyi/metrics-collector/internal/config"
 	"github.com/DaniilPodruchnyi/metrics-collector/internal/config/db"
 	"github.com/DaniilPodruchnyi/metrics-collector/internal/handler"
+	"github.com/DaniilPodruchnyi/metrics-collector/internal/model"
 	custommiddleware "github.com/DaniilPodruchnyi/metrics-collector/internal/middleware"
+	metrics "github.com/DaniilPodruchnyi/metrics-collector/internal/proto"
 	"github.com/DaniilPodruchnyi/metrics-collector/internal/repository"
 	"github.com/DaniilPodruchnyi/metrics-collector/internal/security"
 	"github.com/DaniilPodruchnyi/metrics-collector/internal/service"
@@ -20,6 +22,9 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/zap"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // Server инкапсулирует HTTP-сервер, хранилище и обработчики метрик.
@@ -36,6 +41,7 @@ type Server struct {
 	storageType  string // "postgres", "file", или "memory"
 	privateKey   *rsa.PrivateKey
 	trustedCIDR  *net.IPNet
+	grpcServer   *grpc.Server
 }
 
 // New создает новый сервер метрик на основе конфигурации.
@@ -137,12 +143,66 @@ func New(cfg *config.ServerConfig) *Server {
 	return s
 }
 
+// UpdateMetrics реализует gRPC-сервис Metrics.UpdateMetrics.
+// Использует batch‑обновление метрик и ту же бизнес-логику, что и HTTP‑обработчики.
+func (s *Server) UpdateMetrics(ctx context.Context, req *metrics.UpdateMetricsRequest) (*metrics.UpdateMetricsResponse, error) {
+	if req == nil || len(req.Metrics) == 0 {
+		return &metrics.UpdateMetricsResponse{}, nil
+	}
+
+	batch := make([]model.Metrics, 0, len(req.Metrics))
+	for _, m := range req.Metrics {
+		if m == nil {
+			continue
+		}
+
+		var (
+			mType string
+			delta *int64
+			value *float64
+		)
+
+		switch m.Type {
+		case metrics.Metric_COUNTER:
+			mType = model.Counter
+			d := m.Delta
+			delta = &d
+		default:
+			// По умолчанию считаем GAUGE.
+			mType = model.Gauge
+			v := m.Value
+			value = &v
+		}
+
+		batch = append(batch, model.Metrics{
+			ID:    m.Id,
+			MType: mType,
+			Delta: delta,
+			Value: value,
+		})
+	}
+
+	if err := s.service.UpdateMetricsBatch(batch); err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to update metrics batch: %v", err)
+	}
+
+	// Сохраняем метрики, если настроен синхронный режим для файлового хранилища.
+	s.SaveOnUpdate()
+
+	return &metrics.UpdateMetricsResponse{}, nil
+}
+
 // Start запускает HTTP-сервер и, при необходимости, фоновое сохранение метрик.
 func (s *Server) Start(ctx context.Context) error {
 	router := s.setupRoutes()
 
 	serverCtx, cancel := context.WithCancel(ctx)
 	s.cancelFunc = cancel
+
+	// При необходимости запускаем gRPC‑сервер в отдельной горутине.
+	if s.config.GRPCAddress != "" {
+		go s.startGRPCServer(serverCtx)
+	}
 
 	// Запускаем периодическое сохранение ТОЛЬКО для file storage
 	if s.storageType == "file" && !s.config.IsSyncMode() {
@@ -209,6 +269,23 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 	if s.cancelFunc != nil {
 		s.cancelFunc()
+	}
+
+	// Останавливаем gRPC‑сервер, если он запущен.
+	if s.grpcServer != nil {
+		log.Println("Stopping gRPC server...")
+		stopped := make(chan struct{})
+		go func() {
+			s.grpcServer.GracefulStop()
+			close(stopped)
+		}()
+
+		select {
+		case <-stopped:
+		case <-ctx.Done():
+			// Если graceful‑остановка не удалась за время таймаута — принудительно останавливаем.
+			s.grpcServer.Stop()
+		}
 	}
 
 	// Закрываем пул соединений

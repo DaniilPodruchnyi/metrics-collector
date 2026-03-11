@@ -15,6 +15,7 @@ import (
 // ServerConfig содержит конфигурацию сервера
 type ServerConfig struct {
 	Address         string
+	GRPCAddress     string
 	StoreInterval   time.Duration
 	FileStoragePath string
 	Restore         bool
@@ -29,6 +30,7 @@ type ServerConfig struct {
 // serverConfigFile описывает формат JSON-конфигурации сервера
 type serverConfigFile struct {
 	Address       string `json:"address"`
+	GRPCAddress   string `json:"grpc_address"`
 	Restore       *bool  `json:"restore"`
 	StoreInterval string `json:"store_interval"`
 	StoreFile     string `json:"store_file"`
@@ -51,6 +53,7 @@ func ParseServerConfig() (*ServerConfig, error) {
 	var (
 		configPath   string
 		addrFlag     = flag.String("a", "", "server address")
+		grpcAddrFlag = flag.String("grpc-address", "", "gRPC server address")
 		intervalFlag = flag.Int("i", defaultInterval, "store interval in seconds")
 		fileFlag     = flag.String("f", "", "file storage path")
 		restoreFlag  = flag.Bool("r", defaultRestore, "restore from file on startup")
@@ -95,6 +98,17 @@ func ParseServerConfig() (*ServerConfig, error) {
 		address = env
 	} else if f := flag.Lookup("a"); f != nil && f.Value.String() != f.DefValue {
 		address = *addrFlag
+	}
+
+	// GRPC_ADDRESS
+	grpcAddress := ""
+	if fileCfg.GRPCAddress != "" {
+		grpcAddress = fileCfg.GRPCAddress
+	}
+	if env := os.Getenv("GRPC_ADDRESS"); env != "" {
+		grpcAddress = env
+	} else if f := flag.Lookup("grpc-address"); f != nil && f.Value.String() != f.DefValue {
+		grpcAddress = *grpcAddrFlag
 	}
 
 	// STORE_INTERVAL (секунды в env/флагах, duration в JSON)
@@ -206,6 +220,7 @@ func ParseServerConfig() (*ServerConfig, error) {
 
 	config := &ServerConfig{
 		Address:         address,
+		GRPCAddress:     grpcAddress,
 		StoreInterval:   time.Duration(storeIntervalSeconds) * time.Second,
 		FileStoragePath: fileStoragePath,
 		Restore:         restore,
@@ -282,8 +297,8 @@ func (c *ServerConfig) String() string {
 		trustedSubnetInfo = c.TrustedSubnet
 	}
 
-	return fmt.Sprintf("Server{Address: %s, StoreInterval: %v, FilePath: %s, Restore: %v, Key: %s, CryptoKey: %s, AuditFile: %s, AuditURL: %s, TrustedSubnet: %s}",
-		c.Address, c.StoreInterval, c.FileStoragePath, c.Restore, keyInfo, cryptoInfo, auditFileInfo, auditURLInfo, trustedSubnetInfo)
+	return fmt.Sprintf("Server{Address: %s, GRPCAddress: %s, StoreInterval: %v, FilePath: %s, Restore: %v, Key: %s, CryptoKey: %s, AuditFile: %s, AuditURL: %s, TrustedSubnet: %s}",
+		c.Address, c.GRPCAddress, c.StoreInterval, c.FileStoragePath, c.Restore, keyInfo, cryptoInfo, auditFileInfo, auditURLInfo, trustedSubnetInfo)
 }
 
 // LogConfig выводит конфигурацию в лог
