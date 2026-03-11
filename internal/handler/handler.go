@@ -18,6 +18,45 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+var metricsTemplate = template.Must(template.New("metrics").Parse(`<!DOCTYPE html>
+<html>
+<head>
+    <title>Metrics</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 40px; }
+        table { border-collapse: collapse; width: 100%; }
+        th, td { border: 1px solid #ddd; padding: 12px; text-align: left; }
+        th { background-color: #f2f2f2; }
+        .counter { color: #007bff; }
+        .gauge { color: #28a745; }
+    </style>
+</head>
+<body>
+    <h1>Metrics Dashboard</h1>
+    <table>
+        <tr>
+            <th>Name</th>
+            <th>Type</th>
+            <th>Value</th>
+        </tr>
+        {{range $name, $metric := .}}
+        <tr>
+            <td>{{$name}}</td>
+            <td class="{{$metric.MType}}">{{$metric.MType}}</td>
+            <td>
+                {{if eq $metric.MType "counter"}}
+                    {{if $metric.Delta}}{{.Delta}}{{else}}0{{end}}
+                {{else if eq $metric.MType "gauge"}}
+                    {{if $metric.Value}}{{.Value}}{{else}}0{{end}}
+                {{end}}
+            </td>
+        </tr>
+        {{end}}
+    </table>
+    <p>Total metrics: {{len .}}</p>
+</body>
+</html>`))
+
 type MetricHandler struct {
 	service *service.MetricService
 	dbPool  *pgxpool.Pool
@@ -160,56 +199,10 @@ func (h *MetricHandler) GetMetricValue(w http.ResponseWriter, r *http.Request) {
 func (h *MetricHandler) GetAllMetricsHTML(w http.ResponseWriter, r *http.Request) {
 	metrics := h.service.GetAllMetrics()
 
-	// HTML-шаблон для отображения метрик
-	tmpl := `<!DOCTYPE html>
-<html>
-<head>
-    <title>Metrics</title>
-    <style>
-        body { font-family: Arial, sans-serif; margin: 40px; }
-        table { border-collapse: collapse; width: 100%; }
-        th, td { border: 1px solid #ddd; padding: 12px; text-align: left; }
-        th { background-color: #f2f2f2; }
-        .counter { color: #007bff; }
-        .gauge { color: #28a745; }
-    </style>
-</head>
-<body>
-    <h1>Metrics Dashboard</h1>
-    <table>
-        <tr>
-            <th>Name</th>
-            <th>Type</th>
-            <th>Value</th>
-        </tr>
-        {{range $name, $metric := .}}
-        <tr>
-            <td>{{$name}}</td>
-            <td class="{{$metric.MType}}">{{$metric.MType}}</td>
-            <td>
-                {{if eq $metric.MType "counter"}}
-                    {{if $metric.Delta}}{{.Delta}}{{else}}0{{end}}
-                {{else if eq $metric.MType "gauge"}}
-                    {{if $metric.Value}}{{.Value}}{{else}}0{{end}}
-                {{end}}
-            </td>
-        </tr>
-        {{end}}
-    </table>
-    <p>Total metrics: {{len .}}</p>
-</body>
-</html>`
-
-	t, err := template.New("metrics").Parse(tmpl)
-	if err != nil {
-		http.Error(w, "Template error", http.StatusInternalServerError)
-		return
-	}
-
 	w.Header().Set("Content-Type", "text/html")
 	w.WriteHeader(http.StatusOK)
 
-	err = t.Execute(w, metrics)
+	err := metricsTemplate.Execute(w, metrics)
 	if err != nil {
 		http.Error(w, "Template execution error", http.StatusInternalServerError)
 		return

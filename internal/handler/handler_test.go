@@ -642,3 +642,32 @@ func TestGaugeOverwrite(t *testing.T) {
 		t.Errorf("Expected value to be 200.7, got: %s", w3.Body.String())
 	}
 }
+
+// ============================================================================
+// Бенчмарки
+// ============================================================================
+
+func BenchmarkGetAllMetricsHTML(b *testing.B) {
+	repo := repository.New()
+	svc := service.New(repo)
+	handler := New(svc, nil)
+	router := setupRouter(handler)
+
+	// Подготовка данных: несколько десятков метрик
+	for i := 0; i < 100; i++ {
+		name := "Metric" + string(rune('0'+(i%10)))
+		svc.UpdateMetrics("gauge", name, "123.456")
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			b.Fatalf("unexpected status: %d", w.Code)
+		}
+	}
+}
+
