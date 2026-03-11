@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -12,7 +13,30 @@ import (
 	"github.com/DaniilPodruchnyi/metrics-collector/internal/server"
 )
 
+var buildVersion string
+var buildDate string
+var buildCommit string
+
 func main() {
+	version := buildVersion
+	if version == "" {
+		version = "N/A"
+	}
+
+	date := buildDate
+	if date == "" {
+		date = "N/A"
+	}
+
+	commit := buildCommit
+	if commit == "" {
+		commit = "N/A"
+	}
+
+	fmt.Println("Build version:", version)
+	fmt.Println("Build date:", date)
+	fmt.Println("Build commit:", commit)
+
 	// Парсим конфигурацию
 	cfg, err := config.ParseServerConfig()
 	if err != nil {
