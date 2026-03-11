@@ -3,11 +3,14 @@ package config
 import (
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"strconv"
 	"strings"
 	"time"
+
+	"encoding/json"
 )
 
 // AgentConfig содержит конфигурацию агента
@@ -20,6 +23,16 @@ type AgentConfig struct {
 	CryptoKeyPath  string // Путь к файлу с публичным ключом (RSA)
 }
 
+// agentConfigFile описывает формат JSON-конфигурации агента
+type agentConfigFile struct {
+	Address        string `json:"address"`
+	ReportInterval string `json:"report_interval"`
+	PollInterval   string `json:"poll_interval"`
+	Key            string `json:"key"`
+	RateLimit      *int   `json:"rate_limit"`
+	CryptoKey      string `json:"crypto_key"`
+}
+
 func ParseAgentConfig() (*AgentConfig, error) {
 	// Значения по умолчанию
 	const (
@@ -29,6 +42,7 @@ func ParseAgentConfig() (*AgentConfig, error) {
 		defaultRateLimit  = 3 // По умолчанию 3 одновременных запроса
 	)
 	var (
+		configPath    string
 		serverAddrFlag = flag.String("a", "", "server address")
 		pollFlag       = flag.Int("p", defaultPoll, "poll interval in seconds")
 		reportFlag     = flag.Int("r", defaultReport, "report interval in seconds")
@@ -36,25 +50,111 @@ func ParseAgentConfig() (*AgentConfig, error) {
 		rateLimitFlag  = flag.Int("l", defaultRateLimit, "rate limit (max concurrent requests)")
 		cryptoKeyFlag  = flag.String("crypto-key", "", "path to public key file for asymmetric encryption (RSA)")
 	)
+
+	// Путь к файлу конфигурации: флаги -c / -config
+	flag.StringVar(&configPath, "c", "", "path to configuration file (JSON)")
+	flag.StringVar(&configPath, "config", "", "path to configuration file (JSON)")
+
 	flag.Parse()
 
-	// 1. ADDRESS
-	serverAddr := getEnvOrFlagString("ADDRESS", *serverAddrFlag, defaultServerAddr)
-	// 2. POLL_INTERVAL
-	pollInterval := getEnvOrFlagInt("POLL_INTERVAL", *pollFlag, defaultPoll)
-	// 3. REPORT_INTERVAL
-	reportInterval := getEnvOrFlagInt("REPORT_INTERVAL", *reportFlag, defaultReport)
-	// 4. KEY
-	key := getEnvOrFlagString("KEY", *keyFlag, "")
-	// 5. RATE_LIMIT
-	rateLimit := getEnvOrFlagInt("RATE_LIMIT", *rateLimitFlag, defaultRateLimit)
-	// 6. CRYPTO_KEY (путь до публичного ключа)
-	cryptoKeyPath := getEnvOrFlagString("CRYPTO_KEY", *cryptoKeyFlag, "")
+	// Если путь не задан флагом, пробуем переменную окружения CONFIG
+	if configPath == "" {
+		configPath = os.Getenv("CONFIG")
+	}
+
+	var fileCfg agentConfigFile
+	if configPath != "" {
+		cfgFromFile, err := loadAgentConfigFromFile(configPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load agent config file: %w", err)
+		}
+		if cfgFromFile != nil {
+			fileCfg = *cfgFromFile
+		}
+	}
+
+	// Приоритет опций: env -> flag -> config file -> default
+
+	// ADDRESS
+	serverAddr := defaultServerAddr
+	if fileCfg.Address != "" {
+		serverAddr = fileCfg.Address
+	}
+	if env := os.Getenv("ADDRESS"); env != "" {
+		serverAddr = env
+	} else if f := flag.Lookup("a"); f != nil && f.Value.String() != f.DefValue {
+		serverAddr = *serverAddrFlag
+	}
+
+	// POLL_INTERVAL (секунды в env/флагах, duration в JSON)
+	pollSeconds := defaultPoll
+	if fileCfg.PollInterval != "" {
+		if d, err := time.ParseDuration(fileCfg.PollInterval); err == nil && d > 0 {
+			pollSeconds = int(d.Seconds())
+		}
+	}
+	if env := os.Getenv("POLL_INTERVAL"); env != "" {
+		if parsed, err := strconv.Atoi(env); err == nil {
+			pollSeconds = parsed
+		}
+	} else if f := flag.Lookup("p"); f != nil && f.Value.String() != f.DefValue {
+		pollSeconds = *pollFlag
+	}
+
+	// REPORT_INTERVAL (секунды в env/флагах, duration в JSON)
+	reportSeconds := defaultReport
+	if fileCfg.ReportInterval != "" {
+		if d, err := time.ParseDuration(fileCfg.ReportInterval); err == nil && d > 0 {
+			reportSeconds = int(d.Seconds())
+		}
+	}
+	if env := os.Getenv("REPORT_INTERVAL"); env != "" {
+		if parsed, err := strconv.Atoi(env); err == nil {
+			reportSeconds = parsed
+		}
+	} else if f := flag.Lookup("r"); f != nil && f.Value.String() != f.DefValue {
+		reportSeconds = *reportFlag
+	}
+
+	// KEY
+	key := ""
+	if fileCfg.Key != "" {
+		key = fileCfg.Key
+	}
+	if env := os.Getenv("KEY"); env != "" {
+		key = env
+	} else if f := flag.Lookup("k"); f != nil && f.Value.String() != f.DefValue {
+		key = *keyFlag
+	}
+
+	// RATE_LIMIT
+	rateLimit := defaultRateLimit
+	if fileCfg.RateLimit != nil {
+		rateLimit = *fileCfg.RateLimit
+	}
+	if env := os.Getenv("RATE_LIMIT"); env != "" {
+		if parsed, err := strconv.Atoi(env); err == nil {
+			rateLimit = parsed
+		}
+	} else if f := flag.Lookup("l"); f != nil && f.Value.String() != f.DefValue {
+		rateLimit = *rateLimitFlag
+	}
+
+	// CRYPTO_KEY (путь до публичного ключа)
+	cryptoKeyPath := ""
+	if fileCfg.CryptoKey != "" {
+		cryptoKeyPath = fileCfg.CryptoKey
+	}
+	if env := os.Getenv("CRYPTO_KEY"); env != "" {
+		cryptoKeyPath = env
+	} else if f := flag.Lookup("crypto-key"); f != nil && f.Value.String() != f.DefValue {
+		cryptoKeyPath = *cryptoKeyFlag
+	}
 
 	config := &AgentConfig{
 		ServerAddress:  normalizeServerAddress(serverAddr),
-		PollInterval:   time.Duration(pollInterval) * time.Second,
-		ReportInterval: time.Duration(reportInterval) * time.Second,
+		PollInterval:   time.Duration(pollSeconds) * time.Second,
+		ReportInterval: time.Duration(reportSeconds) * time.Second,
 		Key:            key,
 		RateLimit:      rateLimit,
 		CryptoKeyPath:  cryptoKeyPath,
@@ -160,4 +260,30 @@ func (c *AgentConfig) HasKey() bool {
 // HasCryptoKeyPath возвращает true, если путь к публичному ключу задан
 func (c *AgentConfig) HasCryptoKeyPath() bool {
 	return c.CryptoKeyPath != ""
+}
+
+// loadAgentConfigFromFile читает и парсит JSON-файл конфигурации агента
+func loadAgentConfigFromFile(path string) (*agentConfigFile, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		_ = f.Close()
+	}()
+
+	data, err := io.ReadAll(f)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(data) == 0 {
+		return &agentConfigFile{}, nil
+	}
+
+	var cfg agentConfigFile
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return nil, err
+	}
+	return &cfg, nil
 }
