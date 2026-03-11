@@ -17,6 +17,8 @@ type ServerConfig struct {
 	Restore         bool
 	DatabaseDSN     string
 	Key             string // Ключ для проверки подписи
+	AuditFile       string // Путь к файлу аудита (если пусто - выключено)
+	AuditURL        string // URL приёмника аудита (если пусто - выключено)
 }
 
 func ParseServerConfig() (*ServerConfig, error) {
@@ -34,6 +36,8 @@ func ParseServerConfig() (*ServerConfig, error) {
 		restoreFlag  = flag.Bool("r", defaultRestore, "restore from file on startup")
 		databaseFlag = flag.String("d", "", "database DSN")
 		keyFlag      = flag.String("k", "", "key for signing responses (SHA256)")
+		auditFile    = flag.String("audit-file", "", "audit file path (empty disables audit file sink)")
+		auditURL     = flag.String("audit-url", "", "audit remote url (empty disables audit http sink)")
 	)
 	flag.Parse()
 
@@ -43,6 +47,8 @@ func ParseServerConfig() (*ServerConfig, error) {
 	fileStoragePath := getEnvOrFlagString("FILE_STORAGE_PATH", *fileFlag, defaultStoragePath)
 	databaseDSN := getEnvOrFlagString("DATABASE_DSN", *databaseFlag, "")
 	key := getEnvOrFlagString("KEY", *keyFlag, "")
+	auditFilePath := getEnvOrFlagString("AUDIT_FILE", *auditFile, "")
+	auditURLValue := getEnvOrFlagString("AUDIT_URL", *auditURL, "")
 
 	// Передаем "r" как имя флага для Lookup
 	restore := getEnvOrFlagBool("RESTORE", "r", *restoreFlag, defaultRestore)
@@ -54,6 +60,8 @@ func ParseServerConfig() (*ServerConfig, error) {
 		Restore:         restore,
 		DatabaseDSN:     databaseDSN,
 		Key:             key,
+		AuditFile:       auditFilePath,
+		AuditURL:        auditURLValue,
 	}
 
 	if err := config.validate(); err != nil {
@@ -106,8 +114,17 @@ func (c *ServerConfig) String() string {
 	if c.Key != "" {
 		keyInfo = "configured"
 	}
-	return fmt.Sprintf("Server{Address: %s, StoreInterval: %v, FilePath: %s, Restore: %v, Key: %s}",
-		c.Address, c.StoreInterval, c.FileStoragePath, c.Restore, keyInfo)
+	auditFileInfo := "disabled"
+	if c.AuditFile != "" {
+		auditFileInfo = c.AuditFile
+	}
+	auditURLInfo := "disabled"
+	if c.AuditURL != "" {
+		auditURLInfo = c.AuditURL
+	}
+
+	return fmt.Sprintf("Server{Address: %s, StoreInterval: %v, FilePath: %s, Restore: %v, Key: %s, AuditFile: %s, AuditURL: %s}",
+		c.Address, c.StoreInterval, c.FileStoragePath, c.Restore, keyInfo, auditFileInfo, auditURLInfo)
 }
 
 // LogConfig выводит конфигурацию в лог
