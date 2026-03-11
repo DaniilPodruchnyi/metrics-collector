@@ -34,20 +34,20 @@ func init() {
 	encoding.RegisterCodec(JSONCodec)
 }
 
-// Metric_MType соответствует enum MType из metrics.proto.
-type Metric_MType int32
+// MetricMType соответствует enum MType из metrics.proto.
+type MetricMType int32
 
 const (
-	Metric_GAUGE   Metric_MType = 0
-	Metric_COUNTER Metric_MType = 1
+	MetricGAUGE   MetricMType = 0
+	MetricCOUNTER MetricMType = 1
 )
 
 // Metric соответствует message Metric из metrics.proto.
 type Metric struct {
-	Id    string      `json:"id"`
-	Type  Metric_MType `json:"type"`
-	Delta int64       `json:"delta,omitempty"`
-	Value float64     `json:"value,omitempty"`
+	ID    string     `json:"id"`
+	Type  MetricMType `json:"type"`
+	Delta int64      `json:"delta,omitempty"`
+	Value float64    `json:"value,omitempty"`
 }
 
 // UpdateMetricsRequest соответствует message UpdateMetricsRequest.
@@ -72,7 +72,7 @@ func (UnimplementedMetricsServer) UpdateMetrics(context.Context, *UpdateMetricsR
 
 // RegisterMetricsServer регистрирует реализацию сервиса на gRPC‑сервере.
 func RegisterMetricsServer(s *grpc.Server, srv MetricsServer) {
-	s.RegisterService(&_Metrics_serviceDesc, srv)
+	s.RegisterService(&_MetricsServiceDesc, srv)
 }
 
 // MetricsClient определяет клиентский интерфейс gRPC‑сервиса Metrics.
@@ -99,7 +99,7 @@ func (c *metricsClient) UpdateMetrics(ctx context.Context, in *UpdateMetricsRequ
 }
 
 // Внутренняя обвязка для регистрации метода UpdateMetrics.
-func _Metrics_UpdateMetrics_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+func _MetricsUpdateMetricsHandler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(UpdateMetricsRequest)
 	if err := dec(in); err != nil {
 		return nil, err
@@ -117,13 +117,13 @@ func _Metrics_UpdateMetrics_Handler(srv interface{}, ctx context.Context, dec fu
 	return interceptor(ctx, in, info, handler)
 }
 
-var _Metrics_serviceDesc = grpc.ServiceDesc{
+var _MetricsServiceDesc = grpc.ServiceDesc{
 	ServiceName: "metrics.Metrics",
 	HandlerType: (*MetricsServer)(nil),
 	Methods: []grpc.MethodDesc{
 		{
 			MethodName: "UpdateMetrics",
-			Handler:    _Metrics_UpdateMetrics_Handler,
+			Handler:    _MetricsUpdateMetricsHandler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

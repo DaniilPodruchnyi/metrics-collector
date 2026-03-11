@@ -163,7 +163,7 @@ func (s *Server) UpdateMetrics(ctx context.Context, req *metrics.UpdateMetricsRe
 		)
 
 		switch m.Type {
-		case metrics.Metric_COUNTER:
+		case metrics.MetricCOUNTER:
 			mType = model.Counter
 			d := m.Delta
 			delta = &d
@@ -175,7 +175,7 @@ func (s *Server) UpdateMetrics(ctx context.Context, req *metrics.UpdateMetricsRe
 		}
 
 		batch = append(batch, model.Metrics{
-			ID:    m.Id,
+			ID:    m.ID,
 			MType: mType,
 			Delta: delta,
 			Value: value,

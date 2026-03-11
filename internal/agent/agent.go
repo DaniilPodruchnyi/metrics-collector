@@ -112,18 +112,15 @@ func New(cfg *config.AgentConfig) *Agent {
 	}
 
 	// Инициализируем gRPC‑клиент, если задан адрес gRPC‑сервера.
-		if cfg.GRPCAddress != "" {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-
-		conn, err := grpc.DialContext(
-			ctx,
+	if cfg.GRPCAddress != "" {
+		// Используем NewClient вместо устаревшего DialContext.
+		conn, err := grpc.NewClient(
 			cfg.GRPCAddress,
 			grpc.WithTransportCredentials(insecure.NewCredentials()),
 			grpc.WithDefaultCallOptions(grpc.ForceCodec(metrics.JSONCodec)),
 		)
 		if err != nil {
-			log.Printf("Failed to connect to gRPC server %s: %v. Falling back to HTTP transport.", cfg.GRPCAddress, err)
+			log.Printf("Failed to create gRPC client for %s: %v. Falling back to HTTP transport.", cfg.GRPCAddress, err)
 		} else {
 			agent.grpcConn = conn
 			agent.grpcClient = metrics.NewMetricsClient(conn)
@@ -310,14 +307,14 @@ func (a *Agent) sendMetricsBatchGRPC(ctx context.Context) error {
 
 	for _, m := range metricsCopy {
 		pm := &metrics.Metric{
-			Id: m.ID,
+			ID: m.ID,
 		}
 
 		if m.MType == model.Counter && m.Delta != nil {
-			pm.Type = metrics.Metric_COUNTER
+			pm.Type = metrics.MetricCOUNTER
 			pm.Delta = *m.Delta
 		} else if m.MType == model.Gauge && m.Value != nil {
-			pm.Type = metrics.Metric_GAUGE
+			pm.Type = metrics.MetricGAUGE
 			pm.Value = *m.Value
 		}
 
