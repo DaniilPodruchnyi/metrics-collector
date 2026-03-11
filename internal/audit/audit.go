@@ -11,12 +11,13 @@ type Observer interface {
 	OnAudit(ctx context.Context, e Event)
 }
 
-// Subject реализует паттерн "Наблюдатель": хранит подписчиков и рассылает события.
+// Subject реализует паттерн "Наблюдатель", храня подписчиков и рассылая им события аудита.
 type Subject struct {
 	mu        sync.RWMutex
 	observers []Observer
 }
 
+// NewSubject создает новый субъект аудита без подписчиков.
 func NewSubject() *Subject {
 	return &Subject{}
 }

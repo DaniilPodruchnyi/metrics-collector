@@ -9,11 +9,13 @@ import (
 	"time"
 )
 
+// HTTPObserver отправляет события аудита на удаленный HTTP-сервис.
 type HTTPObserver struct {
 	url    string
 	client *http.Client
 }
 
+// NewHTTPObserver создает HTTP-обработчик аудита; при пустом URL возвращает nil.
 func NewHTTPObserver(url string) *HTTPObserver {
 	if url == "" {
 		return nil

@@ -8,11 +8,13 @@ import (
 	"sync"
 )
 
+// FileObserver пишет события аудита в указанный файл, добавляя по строке на событие.
 type FileObserver struct {
 	path string
 	mu   sync.Mutex
 }
 
+// NewFileObserver создает файловый обработчик аудита; при пустом пути возвращает nil.
 func NewFileObserver(path string) *FileObserver {
 	if path == "" {
 		return nil

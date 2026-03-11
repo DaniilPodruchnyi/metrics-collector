@@ -18,6 +18,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// metricsTemplate — предварительно распарсенный HTML-шаблон для дашборда метрик.
 var metricsTemplate = template.Must(template.New("metrics").Parse(`<!DOCTYPE html>
 <html>
 <head>
@@ -55,14 +56,15 @@ var metricsTemplate = template.Must(template.New("metrics").Parse(`<!DOCTYPE htm
     </table>
     <p>Total metrics: {{len .}}</p>
 </body>
-</html>`))
+}</html>`))
 
+// MetricHandler обрабатывает HTTP-запросы к эндпоинтам сервиса метрик.
 type MetricHandler struct {
 	service *service.MetricService
 	dbPool  *pgxpool.Pool
 }
 
-// Функция для инициализации handlers
+// New создает новый HTTP-обработчик для работы с метриками.
 func New(svc *service.MetricService, pool *pgxpool.Pool) *MetricHandler {
 	return &MetricHandler{
 		service: svc,
