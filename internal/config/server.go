@@ -19,6 +19,7 @@ type ServerConfig struct {
 	Key             string // Ключ для проверки подписи
 	AuditFile       string // Путь к файлу аудита (если пусто - выключено)
 	AuditURL        string // URL приёмника аудита (если пусто - выключено)
+	CryptoKeyPath   string // Путь к файлу с приватным ключом (RSA)
 }
 
 func ParseServerConfig() (*ServerConfig, error) {
@@ -38,6 +39,7 @@ func ParseServerConfig() (*ServerConfig, error) {
 		keyFlag      = flag.String("k", "", "key for signing responses (SHA256)")
 		auditFile    = flag.String("audit-file", "", "audit file path (empty disables audit file sink)")
 		auditURL     = flag.String("audit-url", "", "audit remote url (empty disables audit http sink)")
+		cryptoKey    = flag.String("crypto-key", "", "path to private key file for asymmetric encryption (RSA)")
 	)
 	flag.Parse()
 
@@ -49,6 +51,7 @@ func ParseServerConfig() (*ServerConfig, error) {
 	key := getEnvOrFlagString("KEY", *keyFlag, "")
 	auditFilePath := getEnvOrFlagString("AUDIT_FILE", *auditFile, "")
 	auditURLValue := getEnvOrFlagString("AUDIT_URL", *auditURL, "")
+	cryptoKeyPath := getEnvOrFlagString("CRYPTO_KEY", *cryptoKey, "")
 
 	// Передаем "r" как имя флага для Lookup
 	restore := getEnvOrFlagBool("RESTORE", "r", *restoreFlag, defaultRestore)
@@ -62,6 +65,7 @@ func ParseServerConfig() (*ServerConfig, error) {
 		Key:             key,
 		AuditFile:       auditFilePath,
 		AuditURL:        auditURLValue,
+		CryptoKeyPath:   cryptoKeyPath,
 	}
 
 	if err := config.validate(); err != nil {
@@ -114,6 +118,10 @@ func (c *ServerConfig) String() string {
 	if c.Key != "" {
 		keyInfo = "configured"
 	}
+	cryptoInfo := "disabled"
+	if c.CryptoKeyPath != "" {
+		cryptoInfo = c.CryptoKeyPath
+	}
 	auditFileInfo := "disabled"
 	if c.AuditFile != "" {
 		auditFileInfo = c.AuditFile
@@ -123,8 +131,8 @@ func (c *ServerConfig) String() string {
 		auditURLInfo = c.AuditURL
 	}
 
-	return fmt.Sprintf("Server{Address: %s, StoreInterval: %v, FilePath: %s, Restore: %v, Key: %s, AuditFile: %s, AuditURL: %s}",
-		c.Address, c.StoreInterval, c.FileStoragePath, c.Restore, keyInfo, auditFileInfo, auditURLInfo)
+	return fmt.Sprintf("Server{Address: %s, StoreInterval: %v, FilePath: %s, Restore: %v, Key: %s, CryptoKey: %s, AuditFile: %s, AuditURL: %s}",
+		c.Address, c.StoreInterval, c.FileStoragePath, c.Restore, keyInfo, cryptoInfo, auditFileInfo, auditURLInfo)
 }
 
 // LogConfig выводит конфигурацию в лог
@@ -140,4 +148,9 @@ func (c *ServerConfig) IsSyncMode() bool {
 // HasKey возвращает true, если ключ для подписи установлен
 func (c *ServerConfig) HasKey() bool {
 	return c.Key != ""
+}
+
+// HasCryptoKeyPath возвращает true, если путь к приватному ключу задан
+func (c *ServerConfig) HasCryptoKeyPath() bool {
+	return c.CryptoKeyPath != ""
 }

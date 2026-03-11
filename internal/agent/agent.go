@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/rsa"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -38,6 +39,7 @@ type Agent struct {
 	client     *http.Client
 	workerPool *workerpool.WorkerPool
 	wg         sync.WaitGroup
+	publicKey  *rsa.PublicKey
 }
 
 // New создает новый агент с конфигурацией
@@ -73,6 +75,17 @@ func New(cfg *config.AgentConfig) *Agent {
 		},
 	}
 
+	// Загружаем публичный ключ для асимметричного шифрования, если указан путь
+	if cfg.HasCryptoKeyPath() {
+		pub, err := security.LoadPublicKeyFromFile(cfg.CryptoKeyPath)
+		if err != nil {
+			log.Printf("Failed to load public key from %s: %v. Asymmetric encryption disabled.", cfg.CryptoKeyPath, err)
+		} else {
+			agent.publicKey = pub
+			log.Printf("Asymmetric encryption enabled with public key: %s", cfg.CryptoKeyPath)
+		}
+	}
+
 	// Создаем worker pool с обработчиком метрик
 	poolConfig := workerpool.Config{
 		Workers:     cfg.RateLimit,
@@ -90,6 +103,9 @@ func (a *Agent) Run(ctx context.Context) {
 	log.Println("Agent started")
 	if a.config.HasKey() {
 		log.Println("Request signing enabled")
+	}
+	if a.publicKey != nil {
+		log.Println("Asymmetric encryption of requests enabled")
 	}
 	log.Printf("Worker pool size: %d", a.config.RateLimit)
 
@@ -341,7 +357,7 @@ func (a *Agent) sendSingleMetric(ctx context.Context, metric model.Metrics) erro
 	url := a.config.GetServerURL() + "/update"
 
 	// Сериализуем в JSON
-	buf, err := json.Marshal(metric)
+	plain, err := json.Marshal(metric)
 	if err != nil {
 		return fmt.Errorf("failed to marshal metric: %w", err)
 	}
@@ -349,28 +365,47 @@ func (a *Agent) sendSingleMetric(ctx context.Context, metric model.Metrics) erro
 	// Подписываем НЕСЖАТЫЕ данные
 	var hash string
 	if a.config.HasKey() {
-		hash = security.ComputeHMAC(buf, a.config.Key)
+		hash = security.ComputeHMAC(plain, a.config.Key)
 	}
 
-	// Сжимаем данные gzip
-	var gzipBuf bytes.Buffer
-	gz := gzip.NewWriter(&gzipBuf)
-	if _, err := gz.Write(buf); err != nil {
-		return fmt.Errorf("failed to compress data: %w", err)
-	}
-	if err := gz.Close(); err != nil {
-		return fmt.Errorf("failed to close gzip writer: %w", err)
+	var bodyReader io.Reader
+
+	// Если настроен публичный ключ — шифруем запрос и НЕ используем gzip
+	var encrypted bool
+	if a.publicKey != nil {
+		cipher, err := security.EncryptRSA(plain, a.publicKey)
+		if err != nil {
+			return fmt.Errorf("failed to encrypt payload: %w", err)
+		}
+		bodyReader = bytes.NewReader(cipher)
+		encrypted = true
+	} else {
+		// Без асимметричного шифрования — поведение как раньше: gzip
+		var gzipBuf bytes.Buffer
+		gz := gzip.NewWriter(&gzipBuf)
+		if _, err := gz.Write(plain); err != nil {
+			return fmt.Errorf("failed to compress data: %w", err)
+		}
+		if err := gz.Close(); err != nil {
+			return fmt.Errorf("failed to close gzip writer: %w", err)
+		}
+		bodyReader = &gzipBuf
 	}
 
 	// Создаем запрос с контекстом
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, &gzipBuf)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bodyReader)
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Content-Encoding", "gzip")
-	req.Header.Set("Accept-Encoding", "gzip")
+	if encrypted {
+		// Тело полностью зашифровано, gzip не используется
+		req.Header.Set("X-Encrypted", "rsa")
+	} else {
+		req.Header.Set("Content-Encoding", "gzip")
+		req.Header.Set("Accept-Encoding", "gzip")
+	}
 	req.Header.Set("User-Agent", "metrics-agent/3.0")
 
 	// Добавляем хеш
