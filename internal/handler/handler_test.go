@@ -670,4 +670,3 @@ func BenchmarkGetAllMetricsHTML(b *testing.B) {
 		}
 	}
 }
-
