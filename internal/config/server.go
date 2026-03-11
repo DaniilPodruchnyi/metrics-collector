@@ -23,6 +23,7 @@ type ServerConfig struct {
 	AuditFile       string // Путь к файлу аудита (если пусто - выключено)
 	AuditURL        string // URL приёмника аудита (если пусто - выключено)
 	CryptoKeyPath   string // Путь к файлу с приватным ключом (RSA)
+	TrustedSubnet   string // Доверенная подсеть в CIDR-формате
 }
 
 // serverConfigFile описывает формат JSON-конфигурации сервера
@@ -36,6 +37,7 @@ type serverConfigFile struct {
 	AuditFile     string `json:"audit_file"`
 	AuditURL      string `json:"audit_url"`
 	CryptoKey     string `json:"crypto_key"`
+	TrustedSubnet string `json:"trusted_subnet"`
 }
 
 func ParseServerConfig() (*ServerConfig, error) {
@@ -47,16 +49,17 @@ func ParseServerConfig() (*ServerConfig, error) {
 	)
 
 	var (
-		configPath  string
+		configPath   string
 		addrFlag     = flag.String("a", "", "server address")
 		intervalFlag = flag.Int("i", defaultInterval, "store interval in seconds")
 		fileFlag     = flag.String("f", "", "file storage path")
 		restoreFlag  = flag.Bool("r", defaultRestore, "restore from file on startup")
 		databaseFlag = flag.String("d", "", "database DSN")
-		keyFlag      = flag.String("k", "", "key for signing responses (SHA256)")
-		auditFile    = flag.String("audit-file", "", "audit file path (empty disables audit file sink)")
-		auditURL     = flag.String("audit-url", "", "audit remote url (empty disables audit http sink)")
-		cryptoKey    = flag.String("crypto-key", "", "path to private key file for asymmetric encryption (RSA)")
+		keyFlag       = flag.String("k", "", "key for signing responses (SHA256)")
+		auditFile     = flag.String("audit-file", "", "audit file path (empty disables audit file sink)")
+		auditURL      = flag.String("audit-url", "", "audit remote url (empty disables audit http sink)")
+		cryptoKey     = flag.String("crypto-key", "", "path to private key file for asymmetric encryption (RSA)")
+		trustedSubnet = flag.String("t", "", "trusted subnet in CIDR format")
 	)
 
 	// Путь к файлу конфигурации: флаги -c / -config
@@ -177,6 +180,17 @@ func ParseServerConfig() (*ServerConfig, error) {
 		cryptoKeyPath = *cryptoKey
 	}
 
+	// TRUSTED_SUBNET
+	trustedSubnetVal := ""
+	if fileCfg.TrustedSubnet != "" {
+		trustedSubnetVal = fileCfg.TrustedSubnet
+	}
+	if env := os.Getenv("TRUSTED_SUBNET"); env != "" {
+		trustedSubnetVal = env
+	} else if f := flag.Lookup("t"); f != nil && f.Value.String() != f.DefValue {
+		trustedSubnetVal = *trustedSubnet
+	}
+
 	// RESTORE (bool) — JSON: restore, env: RESTORE, flag: -r
 	restore := defaultRestore
 	if fileCfg.Restore != nil {
@@ -200,6 +214,7 @@ func ParseServerConfig() (*ServerConfig, error) {
 		AuditFile:       auditFilePath,
 		AuditURL:        auditURLValue,
 		CryptoKeyPath:   cryptoKeyPath,
+		TrustedSubnet:   trustedSubnetVal,
 	}
 
 	if err := config.validate(); err != nil {
@@ -262,8 +277,13 @@ func (c *ServerConfig) String() string {
 		auditURLInfo = c.AuditURL
 	}
 
-	return fmt.Sprintf("Server{Address: %s, StoreInterval: %v, FilePath: %s, Restore: %v, Key: %s, CryptoKey: %s, AuditFile: %s, AuditURL: %s}",
-		c.Address, c.StoreInterval, c.FileStoragePath, c.Restore, keyInfo, cryptoInfo, auditFileInfo, auditURLInfo)
+	trustedSubnetInfo := "disabled"
+	if c.TrustedSubnet != "" {
+		trustedSubnetInfo = c.TrustedSubnet
+	}
+
+	return fmt.Sprintf("Server{Address: %s, StoreInterval: %v, FilePath: %s, Restore: %v, Key: %s, CryptoKey: %s, AuditFile: %s, AuditURL: %s, TrustedSubnet: %s}",
+		c.Address, c.StoreInterval, c.FileStoragePath, c.Restore, keyInfo, cryptoInfo, auditFileInfo, auditURLInfo, trustedSubnetInfo)
 }
 
 // LogConfig выводит конфигурацию в лог
