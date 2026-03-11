@@ -32,11 +32,11 @@ import (
 	"golang.org/x/tools/go/analysis/passes/unreachable"
 	"golang.org/x/tools/go/analysis/passes/unsafeptr"
 	"golang.org/x/tools/go/analysis/passes/unusedresult"
+	"honnef.co/go/tools/staticcheck"
+	"honnef.co/go/tools/stylecheck"
 
 	"github.com/gostaticanalysis/nilerr"
 	"github.com/gostaticanalysis/typednil"
-	"honnef.co/go/tools/staticcheck"
-	"honnef.co/go/tools/stylecheck"
 )
 
 // Program staticlint implements a project-specific static analysis multichecker.
@@ -64,12 +64,12 @@ import (
 //
 // Запуск:
 //
-//   go run ./cmd/staticlint ./...
+//	go run ./cmd/staticlint ./...
 //
 // или после сборки бинарного файла:
 //
-//   go build -o staticlint ./cmd/staticlint
-//   ./staticlint ./...
+//	go build -o staticlint ./cmd/staticlint
+//	./staticlint ./...
 //
 // Рекомендуется запускать multichecker перед коммитом изменений, а также в CI,
 // чтобы убедиться, что исходный код проходит все подключённые проверки.
@@ -133,4 +133,3 @@ func main() {
 
 	multichecker.Main(analyzers...)
 }
-
