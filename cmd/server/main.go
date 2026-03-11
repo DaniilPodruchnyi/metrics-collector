@@ -51,8 +51,7 @@ func main() {
 
 	// Выполняем graceful shutdown
 	if err := srv.Shutdown(shutdownCtx); err != nil {
-		log.Printf("Server shutdown error: %v", err)
-		os.Exit(1)
+		log.Fatalf("Server shutdown error: %v", err)
 	}
 
 	log.Println("Server stopped gracefully")
