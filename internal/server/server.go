@@ -19,6 +19,7 @@ import (
 	"go.uber.org/zap"
 )
 
+// Server инкапсулирует HTTP-сервер, хранилище и обработчики метрик.
 type Server struct {
 	address     string
 	config      *config.ServerConfig
@@ -32,6 +33,7 @@ type Server struct {
 	storageType string // "postgres", "file", или "memory"
 }
 
+// New создает новый сервер метрик на основе конфигурации.
 func New(cfg *config.ServerConfig) *Server {
 	var metricsRepository repository.MetricRepository
 	var fileStorage storage.PersistentStorage
@@ -107,6 +109,7 @@ func New(cfg *config.ServerConfig) *Server {
 	}
 }
 
+// Start запускает HTTP-сервер и, при необходимости, фоновое сохранение метрик.
 func (s *Server) Start(ctx context.Context) error {
 	router := s.setupRoutes()
 
@@ -161,6 +164,7 @@ func (s *Server) saveMetrics() error {
 	return s.fileStorage.Save(metrics)
 }
 
+// SaveOnUpdate выполняет сохранение метрик сразу после успешного обновления.
 func (s *Server) SaveOnUpdate() {
 	// Сохраняем только для file storage в синхронном режиме
 	if s.storageType == "file" && s.config.IsSyncMode() {
@@ -171,6 +175,7 @@ func (s *Server) SaveOnUpdate() {
 	// Для PostgreSQL ничего не делаем - данные уже в БД
 }
 
+// Shutdown корректно останавливает сервер и освобождает ресурсы.
 func (s *Server) Shutdown(ctx context.Context) error {
 	log.Println("Server is shutting down...")
 
@@ -201,6 +206,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	return nil
 }
 
+// setupRoutes настраивает HTTP-маршруты и middleware сервера.
 func (s *Server) setupRoutes() chi.Router {
 	r := chi.NewRouter()
 	logger, _ := zap.NewProduction()

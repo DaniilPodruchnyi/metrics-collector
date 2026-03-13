@@ -31,12 +31,12 @@ type BatchMetricRepository interface {
 	StoreBatch(metrics []model.Metrics) error
 }
 
-// Структура сервиса по работе с метриками
+// MetricService инкапсулирует бизнес-логику работы с метриками.
 type MetricService struct {
 	repo MetricRepository
 }
 
-// Функция для инициализации сервиса по работе с метриками
+// New создает новый сервис для работы с метриками.
 func New(repo MetricRepository) *MetricService {
 	return &MetricService{
 		repo: repo,

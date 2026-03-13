@@ -3,21 +3,27 @@ package audit
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"os"
 	"sync"
 )
 
+// FileObserver пишет события аудита в указанный файл, добавляя по строке на событие.
 type FileObserver struct {
 	path string
 	mu   sync.Mutex
 }
 
-func NewFileObserver(path string) *FileObserver {
+var ErrEmptyAuditFilePath = errors.New("empty audit file path")
+
+// NewFileObserver создает файловый обработчик аудита.
+// При некорректных параметрах возвращает ошибку.
+func NewFileObserver(path string) (*FileObserver, error) {
 	if path == "" {
-		return nil
+		return nil, ErrEmptyAuditFilePath
 	}
-	return &FileObserver{path: path}
+	return &FileObserver{path: path}, nil
 }
 
 func (o *FileObserver) OnAudit(_ context.Context, e Event) {
