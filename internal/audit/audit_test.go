@@ -62,9 +62,9 @@ func TestFileObserver_AppendsJSONLine(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "audit.log")
 
-	o := NewFileObserver(path)
-	if o == nil {
-		t.Fatalf("expected non-nil observer")
+	o, err := NewFileObserver(path)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
 	}
 
 	e1 := Event{TS: 1, Metrics: []string{"A", "B"}, IPAddress: "10.0.0.1"}
@@ -94,9 +94,9 @@ func TestFileObserver_AppendsJSONLine(t *testing.T) {
 	}
 }
 
-func TestNewFileObserver_EmptyReturnsNil(t *testing.T) {
-	if o := NewFileObserver(""); o != nil {
-		t.Fatalf("expected nil observer for empty path")
+func TestNewFileObserver_EmptyReturnsError(t *testing.T) {
+	if _, err := NewFileObserver(""); err == nil {
+		t.Fatalf("expected error for empty path")
 	}
 }
 
@@ -122,9 +122,9 @@ func TestHTTPObserver_PostsJSON(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	o := NewHTTPObserver(ts.URL)
-	if o == nil {
-		t.Fatalf("expected non-nil observer")
+	o, err := NewHTTPObserver(ts.URL)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
 	}
 
 	e := Event{TS: 3, Metrics: []string{"X"}, IPAddress: "192.168.0.42"}
@@ -144,8 +144,8 @@ func TestHTTPObserver_PostsJSON(t *testing.T) {
 	}
 }
 
-func TestNewHTTPObserver_EmptyReturnsNil(t *testing.T) {
-	if o := NewHTTPObserver(""); o != nil {
-		t.Fatalf("expected nil observer for empty url")
+func TestNewHTTPObserver_EmptyReturnsError(t *testing.T) {
+	if _, err := NewHTTPObserver(""); err == nil {
+		t.Fatalf("expected error for empty url")
 	}
 }
