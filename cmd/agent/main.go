@@ -53,8 +53,7 @@ func main() {
 		defer shutdownCancel()
 
 		if err := agentInstance.Shutdown(shutdownCtx); err != nil {
-			log.Printf("Shutdown error: %v", err)
-			os.Exit(1)
+			log.Fatalf("Shutdown error: %v", err)
 		}
 
 	case <-done:
