@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"time"
@@ -15,17 +16,20 @@ type HTTPObserver struct {
 	client *http.Client
 }
 
-// NewHTTPObserver создает HTTP-обработчик аудита; при пустом URL возвращает nil.
-func NewHTTPObserver(url string) *HTTPObserver {
+var ErrEmptyAuditURL = errors.New("empty audit url")
+
+// NewHTTPObserver создает HTTP-обработчик аудита.
+// При некорректных параметрах возвращает ошибку.
+func NewHTTPObserver(url string) (*HTTPObserver, error) {
 	if url == "" {
-		return nil
+		return nil, ErrEmptyAuditURL
 	}
 	return &HTTPObserver{
 		url: url,
 		client: &http.Client{
 			Timeout: 3 * time.Second,
 		},
-	}
+	}, nil
 }
 
 func (o *HTTPObserver) OnAudit(_ context.Context, e Event) {
