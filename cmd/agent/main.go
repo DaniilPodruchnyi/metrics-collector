@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -10,6 +9,7 @@ import (
 	"time"
 
 	"github.com/DaniilPodruchnyi/metrics-collector/internal/agent"
+	"github.com/DaniilPodruchnyi/metrics-collector/internal/buildinfo"
 	"github.com/DaniilPodruchnyi/metrics-collector/internal/config"
 )
 
@@ -18,24 +18,11 @@ var buildDate string
 var buildCommit string
 
 func main() {
-	version := buildVersion
-	if version == "" {
-		version = "N/A"
-	}
-
-	date := buildDate
-	if date == "" {
-		date = "N/A"
-	}
-
-	commit := buildCommit
-	if commit == "" {
-		commit = "N/A"
-	}
-
-	fmt.Println("Build version:", version)
-	fmt.Println("Build date:", date)
-	fmt.Println("Build commit:", commit)
+	buildinfo.Print(os.Stdout, buildinfo.Info{
+		Version: buildVersion,
+		Date:    buildDate,
+		Commit:  buildCommit,
+	})
 
 	// Парсим конфигурацию
 	cfg, err := config.ParseAgentConfig()
