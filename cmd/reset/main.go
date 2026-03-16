@@ -13,9 +13,9 @@ import (
 )
 
 type structInfo struct {
-	Name   string
-	Type   *ast.StructType
-	Fset   *token.FileSet
+	Name string
+	Type *ast.StructType
+	Fset *token.FileSet
 }
 
 type pkgInfo struct {
@@ -23,6 +23,7 @@ type pkgInfo struct {
 	Structs []structInfo
 }
 
+// reset утилита
 func main() {
 	root, err := os.Getwd()
 	if err != nil {
@@ -277,4 +278,3 @@ func builtinZeroValue(typ string) (string, bool) {
 		return "", false
 	}
 }
-
