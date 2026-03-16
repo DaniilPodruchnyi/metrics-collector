@@ -9,10 +9,21 @@ import (
 	"time"
 
 	"github.com/DaniilPodruchnyi/metrics-collector/internal/agent"
+	"github.com/DaniilPodruchnyi/metrics-collector/internal/buildinfo"
 	"github.com/DaniilPodruchnyi/metrics-collector/internal/config"
 )
 
+var buildVersion string
+var buildDate string
+var buildCommit string
+
 func main() {
+	buildinfo.Print(os.Stdout, buildinfo.Info{
+		Version: buildVersion,
+		Date:    buildDate,
+		Commit:  buildCommit,
+	})
+
 	// Парсим конфигурацию
 	cfg, err := config.ParseAgentConfig()
 	if err != nil {

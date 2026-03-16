@@ -8,11 +8,22 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/DaniilPodruchnyi/metrics-collector/internal/buildinfo"
 	"github.com/DaniilPodruchnyi/metrics-collector/internal/config"
 	"github.com/DaniilPodruchnyi/metrics-collector/internal/server"
 )
 
+var buildVersion string
+var buildDate string
+var buildCommit string
+
 func main() {
+	buildinfo.Print(os.Stdout, buildinfo.Info{
+		Version: buildVersion,
+		Date:    buildDate,
+		Commit:  buildCommit,
+	})
+
 	// Парсим конфигурацию
 	cfg, err := config.ParseServerConfig()
 	if err != nil {
