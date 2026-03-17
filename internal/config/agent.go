@@ -17,6 +17,7 @@ type AgentConfig struct {
 	ReportInterval time.Duration
 	Key            string // Ключ для подписи запросов
 	RateLimit      int    // Максимальное количество одновременных запросов
+	CryptoKeyPath  string // Путь к файлу с публичным ключом (RSA)
 }
 
 func ParseAgentConfig() (*AgentConfig, error) {
@@ -33,6 +34,7 @@ func ParseAgentConfig() (*AgentConfig, error) {
 		reportFlag     = flag.Int("r", defaultReport, "report interval in seconds")
 		keyFlag        = flag.String("k", "", "key for signing requests (SHA256)")
 		rateLimitFlag  = flag.Int("l", defaultRateLimit, "rate limit (max concurrent requests)")
+		cryptoKeyFlag  = flag.String("crypto-key", "", "path to public key file for asymmetric encryption (RSA)")
 	)
 	flag.Parse()
 
@@ -46,6 +48,8 @@ func ParseAgentConfig() (*AgentConfig, error) {
 	key := getEnvOrFlagString("KEY", *keyFlag, "")
 	// 5. RATE_LIMIT
 	rateLimit := getEnvOrFlagInt("RATE_LIMIT", *rateLimitFlag, defaultRateLimit)
+	// 6. CRYPTO_KEY (путь до публичного ключа)
+	cryptoKeyPath := getEnvOrFlagString("CRYPTO_KEY", *cryptoKeyFlag, "")
 
 	config := &AgentConfig{
 		ServerAddress:  normalizeServerAddress(serverAddr),
@@ -53,6 +57,7 @@ func ParseAgentConfig() (*AgentConfig, error) {
 		ReportInterval: time.Duration(reportInterval) * time.Second,
 		Key:            key,
 		RateLimit:      rateLimit,
+		CryptoKeyPath:  cryptoKeyPath,
 	}
 
 	if err := config.validate(); err != nil {
@@ -129,8 +134,12 @@ func (c *AgentConfig) String() string {
 	if c.Key != "" {
 		keyInfo = "configured"
 	}
-	return fmt.Sprintf("Agent{Server: %s, Poll: %v, Report: %v, Key: %s, RateLimit: %d}",
-		c.ServerAddress, c.PollInterval, c.ReportInterval, keyInfo, c.RateLimit)
+	cryptoInfo := "disabled"
+	if c.CryptoKeyPath != "" {
+		cryptoInfo = c.CryptoKeyPath
+	}
+	return fmt.Sprintf("Agent{Server: %s, Poll: %v, Report: %v, Key: %s, RateLimit: %d, CryptoKey: %s}",
+		c.ServerAddress, c.PollInterval, c.ReportInterval, keyInfo, c.RateLimit, cryptoInfo)
 }
 
 // LogConfig выводит конфигурацию в лог
@@ -146,4 +155,9 @@ func (c *AgentConfig) GetServerURL() string {
 // HasKey возвращает true, если ключ для подписи установлен
 func (c *AgentConfig) HasKey() bool {
 	return c.Key != ""
+}
+
+// HasCryptoKeyPath возвращает true, если путь к публичному ключу задан
+func (c *AgentConfig) HasCryptoKeyPath() bool {
+	return c.CryptoKeyPath != ""
 }

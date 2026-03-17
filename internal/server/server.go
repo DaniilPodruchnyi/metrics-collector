@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"crypto/rsa"
 	"log"
 	"net/http"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/DaniilPodruchnyi/metrics-collector/internal/handler"
 	custommiddleware "github.com/DaniilPodruchnyi/metrics-collector/internal/middleware"
 	"github.com/DaniilPodruchnyi/metrics-collector/internal/repository"
+	"github.com/DaniilPodruchnyi/metrics-collector/internal/security"
 	"github.com/DaniilPodruchnyi/metrics-collector/internal/service"
 	"github.com/DaniilPodruchnyi/metrics-collector/internal/storage"
 	"github.com/go-chi/chi/v5"
@@ -31,6 +33,7 @@ type Server struct {
 	cancelFunc  context.CancelFunc
 	dbPool      *pgxpool.Pool
 	storageType string // "postgres", "file", или "memory"
+	privateKey  *rsa.PrivateKey
 }
 
 // New создает новый сервер метрик на основе конфигурации.
@@ -97,7 +100,7 @@ func New(cfg *config.ServerConfig) *Server {
 
 	log.Printf("Storage type selected: %s", storageType)
 
-	return &Server{
+	s := &Server{
 		address:     cfg.Address,
 		config:      cfg,
 		service:     metricService,
@@ -107,6 +110,19 @@ func New(cfg *config.ServerConfig) *Server {
 		dbPool:      pool,
 		storageType: storageType,
 	}
+
+	// Загружаем приватный ключ для асимметричного шифрования, если указан путь
+	if cfg.HasCryptoKeyPath() {
+		priv, err := security.LoadPrivateKeyFromFile(cfg.CryptoKeyPath)
+		if err != nil {
+			log.Printf("Failed to load private key from %s: %v. Asymmetric decryption disabled.", cfg.CryptoKeyPath, err)
+		} else {
+			s.privateKey = priv
+			log.Printf("Asymmetric decryption enabled with private key: %s", cfg.CryptoKeyPath)
+		}
+	}
+
+	return s
 }
 
 // Start запускает HTTP-сервер и, при необходимости, фоновое сохранение метрик.
@@ -212,12 +228,18 @@ func (s *Server) setupRoutes() chi.Router {
 	logger, _ := zap.NewProduction()
 
 	r.Use(middleware.StripSlashes)
-	// ВАЖНО: GzipMiddleware должен быть ПЕРЕД HashVerificationMiddleware
+	// ВАЖНО: GzipMiddleware должен быть ПЕРЕД CryptoMiddleware и HashVerificationMiddleware
 	r.Use(custommiddleware.GzipMiddleware)
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.RequestID)
 	r.Use(custommiddleware.ZapLoggerMiddleware(logger))
+
+	// Расшифровка запросов (если настроен приватный ключ)
+	if s.privateKey != nil {
+		log.Println("Asymmetric decryption middleware enabled")
+		r.Use(custommiddleware.CryptoMiddleware(s.privateKey))
+	}
 
 	// Hash middleware - применяются после gzip декомпрессии
 	if s.config.HasKey() {
