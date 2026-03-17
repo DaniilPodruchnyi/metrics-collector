@@ -3,10 +3,13 @@ package config
 import (
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"strconv"
 	"time"
+
+	"encoding/json"
 )
 
 // ServerConfig содержит конфигурацию сервера
@@ -22,6 +25,19 @@ type ServerConfig struct {
 	CryptoKeyPath   string // Путь к файлу с приватным ключом (RSA)
 }
 
+// serverConfigFile описывает формат JSON-конфигурации сервера
+type serverConfigFile struct {
+	Address       string `json:"address"`
+	Restore       *bool  `json:"restore"`
+	StoreInterval string `json:"store_interval"`
+	StoreFile     string `json:"store_file"`
+	DatabaseDSN   string `json:"database_dsn"`
+	Key           string `json:"key"`
+	AuditFile     string `json:"audit_file"`
+	AuditURL      string `json:"audit_url"`
+	CryptoKey     string `json:"crypto_key"`
+}
+
 func ParseServerConfig() (*ServerConfig, error) {
 	const (
 		defaultAddr        = "localhost:8080"
@@ -31,6 +47,7 @@ func ParseServerConfig() (*ServerConfig, error) {
 	)
 
 	var (
+		configPath  string
 		addrFlag     = flag.String("a", "", "server address")
 		intervalFlag = flag.Int("i", defaultInterval, "store interval in seconds")
 		fileFlag     = flag.String("f", "", "file storage path")
@@ -41,24 +58,141 @@ func ParseServerConfig() (*ServerConfig, error) {
 		auditURL     = flag.String("audit-url", "", "audit remote url (empty disables audit http sink)")
 		cryptoKey    = flag.String("crypto-key", "", "path to private key file for asymmetric encryption (RSA)")
 	)
+
+	// Путь к файлу конфигурации: флаги -c / -config
+	flag.StringVar(&configPath, "c", "", "path to configuration file (JSON)")
+	flag.StringVar(&configPath, "config", "", "path to configuration file (JSON)")
+
 	flag.Parse()
 
-	// Приоритет: env -> flag -> default
-	address := getEnvOrFlagString("ADDRESS", *addrFlag, defaultAddr)
-	storeInterval := getEnvOrFlagInt("STORE_INTERVAL", *intervalFlag, defaultInterval)
-	fileStoragePath := getEnvOrFlagString("FILE_STORAGE_PATH", *fileFlag, defaultStoragePath)
-	databaseDSN := getEnvOrFlagString("DATABASE_DSN", *databaseFlag, "")
-	key := getEnvOrFlagString("KEY", *keyFlag, "")
-	auditFilePath := getEnvOrFlagString("AUDIT_FILE", *auditFile, "")
-	auditURLValue := getEnvOrFlagString("AUDIT_URL", *auditURL, "")
-	cryptoKeyPath := getEnvOrFlagString("CRYPTO_KEY", *cryptoKey, "")
+	// Если путь не задан флагом, пробуем переменную окружения CONFIG
+	if configPath == "" {
+		configPath = os.Getenv("CONFIG")
+	}
 
-	// Передаем "r" как имя флага для Lookup
-	restore := getEnvOrFlagBool("RESTORE", "r", *restoreFlag, defaultRestore)
+	var fileCfg serverConfigFile
+	if configPath != "" {
+		cfgFromFile, err := loadServerConfigFromFile(configPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load server config file: %w", err)
+		}
+		if cfgFromFile != nil {
+			fileCfg = *cfgFromFile
+		}
+	}
+
+	// Приоритет опций: env -> flag -> config file -> default
+
+	// ADDRESS
+	address := defaultAddr
+	if fileCfg.Address != "" {
+		address = fileCfg.Address
+	}
+	if env := os.Getenv("ADDRESS"); env != "" {
+		address = env
+	} else if f := flag.Lookup("a"); f != nil && f.Value.String() != f.DefValue {
+		address = *addrFlag
+	}
+
+	// STORE_INTERVAL (секунды в env/флагах, duration в JSON)
+	storeIntervalSeconds := defaultInterval
+	if fileCfg.StoreInterval != "" {
+		if d, err := time.ParseDuration(fileCfg.StoreInterval); err == nil {
+			if d >= 0 {
+				storeIntervalSeconds = int(d.Seconds())
+			}
+		}
+	}
+	if env := os.Getenv("STORE_INTERVAL"); env != "" {
+		if parsed, err := strconv.Atoi(env); err == nil {
+			storeIntervalSeconds = parsed
+		}
+	} else if f := flag.Lookup("i"); f != nil && f.Value.String() != f.DefValue {
+		storeIntervalSeconds = *intervalFlag
+	}
+
+	// FILE_STORAGE_PATH / store_file
+	fileStoragePath := defaultStoragePath
+	if fileCfg.StoreFile != "" {
+		fileStoragePath = fileCfg.StoreFile
+	}
+	if env := os.Getenv("FILE_STORAGE_PATH"); env != "" {
+		fileStoragePath = env
+	} else if f := flag.Lookup("f"); f != nil && f.Value.String() != f.DefValue {
+		fileStoragePath = *fileFlag
+	}
+
+	// DATABASE_DSN
+	databaseDSN := ""
+	if fileCfg.DatabaseDSN != "" {
+		databaseDSN = fileCfg.DatabaseDSN
+	}
+	if env := os.Getenv("DATABASE_DSN"); env != "" {
+		databaseDSN = env
+	} else if f := flag.Lookup("d"); f != nil && f.Value.String() != f.DefValue {
+		databaseDSN = *databaseFlag
+	}
+
+	// KEY
+	key := ""
+	if fileCfg.Key != "" {
+		key = fileCfg.Key
+	}
+	if env := os.Getenv("KEY"); env != "" {
+		key = env
+	} else if f := flag.Lookup("k"); f != nil && f.Value.String() != f.DefValue {
+		key = *keyFlag
+	}
+
+	// AUDIT_FILE
+	auditFilePath := ""
+	if fileCfg.AuditFile != "" {
+		auditFilePath = fileCfg.AuditFile
+	}
+	if env := os.Getenv("AUDIT_FILE"); env != "" {
+		auditFilePath = env
+	} else if f := flag.Lookup("audit-file"); f != nil && f.Value.String() != f.DefValue {
+		auditFilePath = *auditFile
+	}
+
+	// AUDIT_URL
+	auditURLValue := ""
+	if fileCfg.AuditURL != "" {
+		auditURLValue = fileCfg.AuditURL
+	}
+	if env := os.Getenv("AUDIT_URL"); env != "" {
+		auditURLValue = env
+	} else if f := flag.Lookup("audit-url"); f != nil && f.Value.String() != f.DefValue {
+		auditURLValue = *auditURL
+	}
+
+	// CRYPTO_KEY
+	cryptoKeyPath := ""
+	if fileCfg.CryptoKey != "" {
+		cryptoKeyPath = fileCfg.CryptoKey
+	}
+	if env := os.Getenv("CRYPTO_KEY"); env != "" {
+		cryptoKeyPath = env
+	} else if f := flag.Lookup("crypto-key"); f != nil && f.Value.String() != f.DefValue {
+		cryptoKeyPath = *cryptoKey
+	}
+
+	// RESTORE (bool) — JSON: restore, env: RESTORE, flag: -r
+	restore := defaultRestore
+	if fileCfg.Restore != nil {
+		restore = *fileCfg.Restore
+	}
+	if env := os.Getenv("RESTORE"); env != "" {
+		if parsed, err := strconv.ParseBool(env); err == nil {
+			restore = parsed
+		}
+	} else if f := flag.Lookup("r"); f != nil && f.Value.String() != f.DefValue {
+		restore = *restoreFlag
+	}
 
 	config := &ServerConfig{
 		Address:         address,
-		StoreInterval:   time.Duration(storeInterval) * time.Second,
+		StoreInterval:   time.Duration(storeIntervalSeconds) * time.Second,
 		FileStoragePath: fileStoragePath,
 		Restore:         restore,
 		DatabaseDSN:     databaseDSN,
@@ -102,9 +236,6 @@ func getEnvOrFlagBool(envKey string, flagName string, flagVal bool, defaultVal b
 func (c *ServerConfig) validate() error {
 	if c.Address == "" {
 		return fmt.Errorf("server address cannot be empty")
-	}
-	if c.FileStoragePath == "" {
-		return fmt.Errorf("file storage path cannot be empty")
 	}
 	if c.StoreInterval < 0 {
 		return fmt.Errorf("store interval cannot be negative")
@@ -153,4 +284,30 @@ func (c *ServerConfig) HasKey() bool {
 // HasCryptoKeyPath возвращает true, если путь к приватному ключу задан
 func (c *ServerConfig) HasCryptoKeyPath() bool {
 	return c.CryptoKeyPath != ""
+}
+
+// loadServerConfigFromFile читает и парсит JSON-файл конфигурации сервера
+func loadServerConfigFromFile(path string) (*serverConfigFile, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		_ = f.Close()
+	}()
+
+	data, err := io.ReadAll(f)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(data) == 0 {
+		return &serverConfigFile{}, nil
+	}
+
+	var cfg serverConfigFile
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return nil, err
+	}
+	return &cfg, nil
 }
