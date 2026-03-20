@@ -10,6 +10,7 @@ import (
 	"io"
 	"log"
 	"math/rand"
+	"net"
 	"net/http"
 	"runtime"
 	"sync"
@@ -40,6 +41,7 @@ type Agent struct {
 	workerPool *workerpool.WorkerPool
 	wg         sync.WaitGroup
 	publicKey  *rsa.PublicKey
+	localIP    string
 }
 
 // New создает новый агент с конфигурацией
@@ -94,6 +96,14 @@ func New(cfg *config.AgentConfig) *Agent {
 	}
 
 	agent.workerPool = workerpool.New(poolConfig, agent.metricJobHandler)
+
+	// Определяем IP-адрес хоста агента (best-effort)
+	if ip := detectLocalIP(); ip != "" {
+		agent.localIP = ip
+		log.Printf("Detected local IP for X-Real-IP: %s", ip)
+	} else {
+		log.Printf("Could not reliably detect local IP for X-Real-IP header")
+	}
 
 	return agent
 }
@@ -408,6 +418,11 @@ func (a *Agent) sendSingleMetric(ctx context.Context, metric model.Metrics) erro
 	}
 	req.Header.Set("User-Agent", "metrics-agent/3.0")
 
+	// Добавляем X-Real-IP с IP-адресом хоста агента (если определен)
+	if a.localIP != "" {
+		req.Header.Set("X-Real-IP", a.localIP)
+	}
+
 	// Добавляем хеш
 	if a.config.HasKey() {
 		req.Header.Set("HashSHA256", hash)
@@ -445,6 +460,53 @@ func (a *Agent) sendSingleMetric(ctx context.Context, metric model.Metrics) erro
 	}
 
 	return nil
+}
+
+// detectLocalIP пытается определить IP-адрес хоста агента.
+// Возвращает первый найденный не-loopback IPv4 адрес либо пустую строку.
+func detectLocalIP() string {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return ""
+	}
+
+	for _, iface := range ifaces {
+		// Пропускаем неактивные и loopback-интерфейсы
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+
+		for _, addr := range addrs {
+			var ip net.IP
+			switch v := addr.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			}
+
+			if ip == nil {
+				continue
+			}
+
+			ip = ip.To4()
+			if ip == nil {
+				// Не IPv4
+				continue
+			}
+
+			if !ip.IsLoopback() {
+				return ip.String()
+			}
+		}
+	}
+
+	return ""
 }
 
 // GetMetrics возвращает копию текущих метрик (для тестирования)
