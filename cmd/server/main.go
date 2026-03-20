@@ -24,11 +24,7 @@ func main() {
 		Commit:  buildCommit,
 	})
 
-	// Парсим конфигурацию.
-	// Поддерживаем:
-	// - JSON-конфиг файла: `-c <path>` или `-config <path>`
-	// - Асимметричное шифрование (RSA):
-	//   `-crypto-key <path>` — путь к приватному ключу для режима шифрования
+	// Парсим конфигурацию
 	cfg, err := config.ParseServerConfig()
 	if err != nil {
 		log.Fatalf("Failed to parse configuration: %v", err)
@@ -46,8 +42,7 @@ func main() {
 
 	// Канал для graceful shutdown
 	sigChan := make(chan os.Signal, 1)
-	// os.Interrupt == SIGINT, не дублируем явное syscall.SIGINT
-	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM, syscall.SIGQUIT)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM, syscall.SIGINT, syscall.SIGQUIT)
 
 	// Запускаем сервер в горутине
 	go func() {
