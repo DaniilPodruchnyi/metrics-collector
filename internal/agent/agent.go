@@ -10,6 +10,7 @@ import (
 	"io"
 	"log"
 	"math/rand"
+	"net"
 	"net/http"
 	"runtime"
 	"sync"
@@ -17,11 +18,15 @@ import (
 
 	"github.com/DaniilPodruchnyi/metrics-collector/internal/config"
 	"github.com/DaniilPodruchnyi/metrics-collector/internal/model"
+	metrics "github.com/DaniilPodruchnyi/metrics-collector/internal/proto"
 	"github.com/DaniilPodruchnyi/metrics-collector/internal/retry"
 	"github.com/DaniilPodruchnyi/metrics-collector/internal/security"
 	"github.com/DaniilPodruchnyi/metrics-collector/internal/workerpool"
 	"github.com/shirou/gopsutil/v4/cpu"
 	"github.com/shirou/gopsutil/v4/mem"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 )
 
 // MetricValue — структура для хранения значения метрики
@@ -40,11 +45,14 @@ type Agent struct {
 	workerPool *workerpool.WorkerPool
 	wg         sync.WaitGroup
 	publicKey  *rsa.PublicKey
+	localIP    string
+	grpcConn   *grpc.ClientConn
+	grpcClient metrics.MetricsClient
 }
 
 // New создает новый агент с конфигурацией
 func New(cfg *config.AgentConfig) *Agent {
-	metrics := make(map[string]*MetricValue)
+	metricValues := make(map[string]*MetricValue)
 
 	// Инициализируем runtime метрики
 	runtimeGaugeMetrics := []string{
@@ -56,20 +64,20 @@ func New(cfg *config.AgentConfig) *Agent {
 	}
 
 	for _, name := range runtimeGaugeMetrics {
-		metrics[name] = &MetricValue{Type: "gauge"}
+		metricValues[name] = &MetricValue{Type: "gauge"}
 	}
 
 	// Специальные метрики
-	metrics["PollCount"] = &MetricValue{Type: "counter", Counter: 0}
-	metrics["RandomValue"] = &MetricValue{Type: "gauge", Gauge: rand.Float64()}
+	metricValues["PollCount"] = &MetricValue{Type: "counter", Counter: 0}
+	metricValues["RandomValue"] = &MetricValue{Type: "gauge", Gauge: rand.Float64()}
 
 	// Gopsutil метрики (инициализация)
-	metrics["TotalMemory"] = &MetricValue{Type: "gauge"}
-	metrics["FreeMemory"] = &MetricValue{Type: "gauge"}
+	metricValues["TotalMemory"] = &MetricValue{Type: "gauge"}
+	metricValues["FreeMemory"] = &MetricValue{Type: "gauge"}
 
 	agent := &Agent{
 		config:  cfg,
-		metrics: metrics,
+		metrics: metricValues,
 		client: &http.Client{
 			Timeout: 10 * time.Second,
 		},
@@ -95,6 +103,30 @@ func New(cfg *config.AgentConfig) *Agent {
 
 	agent.workerPool = workerpool.New(poolConfig, agent.metricJobHandler)
 
+	// Определяем IP-адрес хоста агента (best-effort)
+	if ip := detectLocalIP(); ip != "" {
+		agent.localIP = ip
+		log.Printf("Detected local IP for X-Real-IP: %s", ip)
+	} else {
+		log.Printf("Could not reliably detect local IP for X-Real-IP header")
+	}
+
+	// Инициализируем gRPC‑клиент, если задан адрес gRPC‑сервера.
+	if cfg.GRPCAddress != "" {
+		// Используем NewClient вместо устаревшего DialContext.
+		conn, err := grpc.NewClient(
+			cfg.GRPCAddress,
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+		)
+		if err != nil {
+			log.Printf("Failed to create gRPC client for %s: %v. Falling back to HTTP transport.", cfg.GRPCAddress, err)
+		} else {
+			agent.grpcConn = conn
+			agent.grpcClient = metrics.NewMetricsClient(conn)
+			log.Printf("gRPC transport enabled, server: %s", cfg.GRPCAddress)
+		}
+	}
+
 	return agent
 }
 
@@ -109,8 +141,10 @@ func (a *Agent) Run(ctx context.Context) {
 	}
 	log.Printf("Worker pool size: %d", a.config.RateLimit)
 
-	// 1. Запускаем worker pool
-	a.workerPool.Start(ctx)
+	// 1. Запускаем worker pool только для HTTP‑транспорта.
+	if a.grpcClient == nil {
+		a.workerPool.Start(ctx)
+	}
 
 	// 2. Запускаем сборщик runtime метрик
 	a.wg.Add(1)
@@ -127,8 +161,10 @@ func (a *Agent) Run(ctx context.Context) {
 	// Ждем завершения коллекторов
 	a.wg.Wait()
 
-	// Останавливаем worker pool
-	a.workerPool.Stop()
+	// Останавливаем worker pool, если он запускался.
+	if a.grpcClient == nil {
+		a.workerPool.Stop()
+	}
 
 	log.Println("Agent stopped gracefully")
 }
@@ -144,8 +180,10 @@ func (a *Agent) Shutdown(ctx context.Context) error {
 		// Ждем завершения коллекторов
 		a.wg.Wait()
 
-		// Останавливаем worker pool только один раз
-		a.workerPool.Stop()
+		// Останавливаем worker pool только один раз (для HTTP‑транспорта)
+		if a.grpcClient == nil {
+			a.workerPool.Stop()
+		}
 
 		close(done)
 	}()
@@ -153,6 +191,11 @@ func (a *Agent) Shutdown(ctx context.Context) error {
 	select {
 	case <-done:
 		log.Println("Agent shutdown completed")
+
+		if a.grpcConn != nil {
+			_ = a.grpcConn.Close()
+		}
+
 		return nil
 	case <-ctx.Done():
 		log.Println("Agent shutdown timeout exceeded")
@@ -215,10 +258,88 @@ func (a *Agent) metricsReporter(ctx context.Context) {
 			log.Println("Metrics reporter stopped")
 			return
 		case <-ticker.C:
-			log.Println("Publishing metrics to worker pool...")
-			a.publishMetrics()
+			if a.grpcClient != nil {
+				log.Println("Sending metrics batch via gRPC...")
+				if err := a.sendMetricsBatchGRPC(ctx); err != nil {
+					log.Printf("Failed to send metrics via gRPC: %v", err)
+				}
+			} else {
+				log.Println("Publishing metrics to worker pool...")
+				a.publishMetrics()
+			}
 		}
 	}
+}
+
+// sendMetricsBatchGRPC формирует батч метрик и отправляет его на gRPC‑сервер.
+func (a *Agent) sendMetricsBatchGRPC(ctx context.Context) error {
+	a.mu.RLock()
+
+	metricsCopy := make([]model.Metrics, 0, len(a.metrics))
+	for name, metric := range a.metrics {
+		m := model.Metrics{
+			ID:    name,
+			MType: metric.Type,
+		}
+
+		switch metric.Type {
+		case "counter":
+			delta := metric.Counter
+			m.Delta = &delta
+		case "gauge":
+			value := metric.Gauge
+			m.Value = &value
+		}
+
+		metricsCopy = append(metricsCopy, m)
+	}
+
+	a.mu.RUnlock()
+
+	if len(metricsCopy) == 0 {
+		return nil
+	}
+
+	req := &metrics.UpdateMetricsRequest{
+		Metrics: make([]*metrics.Metric, 0, len(metricsCopy)),
+	}
+
+	for _, m := range metricsCopy {
+		pm := &metrics.Metric{
+			Id: m.ID,
+		}
+
+		switch m.MType {
+		case model.Counter:
+			if m.Delta == nil {
+				log.Printf("skipping counter metric %q: delta is nil", m.ID)
+				continue
+			}
+			pm.Type = metrics.Metric_COUNTER
+			pm.Delta = *m.Delta
+		case model.Gauge:
+			if m.Value == nil {
+				log.Printf("skipping gauge metric %q: value is nil", m.ID)
+				continue
+			}
+			pm.Type = metrics.Metric_GAUGE
+			pm.Value = *m.Value
+		default:
+			log.Printf("skipping metric %q: unknown model type %q", m.ID, m.MType)
+			continue
+		}
+
+		req.Metrics = append(req.Metrics, pm)
+	}
+
+	callCtx := ctx
+	if a.localIP != "" {
+		md := metadata.Pairs("x-real-ip", a.localIP)
+		callCtx = metadata.NewOutgoingContext(ctx, md)
+	}
+
+	_, err := a.grpcClient.UpdateMetrics(callCtx, req)
+	return err
 }
 
 // collectRuntimeMetrics собирает метрики из runtime
@@ -408,6 +529,11 @@ func (a *Agent) sendSingleMetric(ctx context.Context, metric model.Metrics) erro
 	}
 	req.Header.Set("User-Agent", "metrics-agent/3.0")
 
+	// Добавляем X-Real-IP с IP-адресом хоста агента (если определен)
+	if a.localIP != "" {
+		req.Header.Set("X-Real-IP", a.localIP)
+	}
+
 	// Добавляем хеш
 	if a.config.HasKey() {
 		req.Header.Set("HashSHA256", hash)
@@ -445,6 +571,53 @@ func (a *Agent) sendSingleMetric(ctx context.Context, metric model.Metrics) erro
 	}
 
 	return nil
+}
+
+// detectLocalIP пытается определить IP-адрес хоста агента.
+// Возвращает первый найденный не-loopback IPv4 адрес либо пустую строку.
+func detectLocalIP() string {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return ""
+	}
+
+	for _, iface := range ifaces {
+		// Пропускаем неактивные и loopback-интерфейсы
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+
+		for _, addr := range addrs {
+			var ip net.IP
+			switch v := addr.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			}
+
+			if ip == nil {
+				continue
+			}
+
+			ip = ip.To4()
+			if ip == nil {
+				// Не IPv4
+				continue
+			}
+
+			if !ip.IsLoopback() {
+				return ip.String()
+			}
+		}
+	}
+
+	return ""
 }
 
 // GetMetrics возвращает копию текущих метрик (для тестирования)

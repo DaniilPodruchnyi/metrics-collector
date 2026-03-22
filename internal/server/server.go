@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rsa"
 	"log"
+	"net"
 	"net/http"
 	"time"
 
@@ -11,6 +12,8 @@ import (
 	"github.com/DaniilPodruchnyi/metrics-collector/internal/config/db"
 	"github.com/DaniilPodruchnyi/metrics-collector/internal/handler"
 	custommiddleware "github.com/DaniilPodruchnyi/metrics-collector/internal/middleware"
+	"github.com/DaniilPodruchnyi/metrics-collector/internal/model"
+	metrics "github.com/DaniilPodruchnyi/metrics-collector/internal/proto"
 	"github.com/DaniilPodruchnyi/metrics-collector/internal/repository"
 	"github.com/DaniilPodruchnyi/metrics-collector/internal/security"
 	"github.com/DaniilPodruchnyi/metrics-collector/internal/service"
@@ -19,10 +22,15 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/zap"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // Server инкапсулирует HTTP-сервер, хранилище и обработчики метрик.
 type Server struct {
+	metrics.UnimplementedMetricsServer
+
 	address     string
 	config      *config.ServerConfig
 	service     *service.MetricService
@@ -34,6 +42,8 @@ type Server struct {
 	dbPool      *pgxpool.Pool
 	storageType string // "postgres", "file", или "memory"
 	privateKey  *rsa.PrivateKey
+	trustedCIDR *net.IPNet
+	grpcServer  *grpc.Server
 }
 
 // New создает новый сервер метрик на основе конфигурации.
@@ -122,7 +132,69 @@ func New(cfg *config.ServerConfig) *Server {
 		}
 	}
 
+	// Парсим доверенную подсеть, если она указана
+	if cfg.TrustedSubnet != "" {
+		if _, ipnet, err := net.ParseCIDR(cfg.TrustedSubnet); err != nil {
+			log.Printf("Invalid trusted subnet %q: %v. Trusted subnet checks disabled.", cfg.TrustedSubnet, err)
+		} else {
+			s.trustedCIDR = ipnet
+			log.Printf("Trusted subnet configured: %s", cfg.TrustedSubnet)
+		}
+	}
+
 	return s
+}
+
+// UpdateMetrics реализует gRPC-сервис Metrics.UpdateMetrics.
+// Использует batch‑обновление метрик и ту же бизнес-логику, что и HTTP‑обработчики.
+func (s *Server) UpdateMetrics(ctx context.Context, req *metrics.UpdateMetricsRequest) (*metrics.UpdateMetricsResponse, error) {
+	if req == nil || len(req.Metrics) == 0 {
+		return &metrics.UpdateMetricsResponse{}, nil
+	}
+
+	batch := make([]model.Metrics, 0, len(req.Metrics))
+	for _, m := range req.Metrics {
+		if m == nil {
+			continue
+		}
+
+		var (
+			mType string
+			delta *int64
+			value *float64
+		)
+
+		switch m.GetType() {
+		case metrics.Metric_COUNTER:
+			mType = model.Counter
+			d := m.GetDelta()
+			delta = &d
+		case metrics.Metric_GAUGE:
+			mType = model.Gauge
+			v := m.GetValue()
+			value = &v
+		default:
+			log.Printf("skipping metric %q: unknown gRPC metric type %v (%d)",
+				m.GetId(), m.GetType(), int32(m.GetType()))
+			continue
+		}
+
+		batch = append(batch, model.Metrics{
+			ID:    m.GetId(),
+			MType: mType,
+			Delta: delta,
+			Value: value,
+		})
+	}
+
+	if err := s.service.UpdateMetricsBatch(batch); err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to update metrics batch: %v", err)
+	}
+
+	// Сохраняем метрики, если настроен синхронный режим для файлового хранилища.
+	s.SaveOnUpdate()
+
+	return &metrics.UpdateMetricsResponse{}, nil
 }
 
 // Start запускает HTTP-сервер и, при необходимости, фоновое сохранение метрик.
@@ -131,6 +203,11 @@ func (s *Server) Start(ctx context.Context) error {
 
 	serverCtx, cancel := context.WithCancel(ctx)
 	s.cancelFunc = cancel
+
+	// При необходимости запускаем gRPC‑сервер в отдельной горутине.
+	if s.config.GRPCAddress != "" {
+		go s.startGRPCServer(serverCtx)
+	}
 
 	// Запускаем периодическое сохранение ТОЛЬКО для file storage
 	if s.storageType == "file" && !s.config.IsSyncMode() {
@@ -199,6 +276,23 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		s.cancelFunc()
 	}
 
+	// Останавливаем gRPC‑сервер, если он запущен.
+	if s.grpcServer != nil {
+		log.Println("Stopping gRPC server...")
+		stopped := make(chan struct{})
+		go func() {
+			s.grpcServer.GracefulStop()
+			close(stopped)
+		}()
+
+		select {
+		case <-stopped:
+		case <-ctx.Done():
+			// Если graceful‑остановка не удалась за время таймаута — принудительно останавливаем.
+			s.grpcServer.Stop()
+		}
+	}
+
 	// Закрываем пул соединений
 	if s.dbPool != nil {
 		log.Println("Closing database connection pool...")
@@ -249,12 +343,12 @@ func (s *Server) setupRoutes() chi.Router {
 	}
 
 	// Batch endpoint - добавляем оба варианта (с и без slash)
-	r.Post("/updates", s.wrapWithSyncSmart(s.handlers.UpdateMetricsBatch))
-	r.Post("/updates/", s.wrapWithSyncSmart(s.handlers.UpdateMetricsBatch))
+	r.Post("/updates", s.wrapWithSyncSmart(s.wrapWithTrustedSubnetCheck(s.handlers.UpdateMetricsBatch)))
+	r.Post("/updates/", s.wrapWithSyncSmart(s.wrapWithTrustedSubnetCheck(s.handlers.UpdateMetricsBatch)))
 
-	r.Post("/update", s.wrapWithSyncSmart(s.handlers.UpdateMetricsJSON))
+	r.Post("/update", s.wrapWithSyncSmart(s.wrapWithTrustedSubnetCheck(s.handlers.UpdateMetricsJSON)))
 	r.Post("/value", s.handlers.GetMetricJSON)
-	r.Post("/update/{type}/{name}/{value}", s.wrapWithSyncSmart(s.handlers.UpdateMetrics))
+	r.Post("/update/{type}/{name}/{value}", s.wrapWithSyncSmart(s.wrapWithTrustedSubnetCheck(s.handlers.UpdateMetrics)))
 	r.Get("/value/{type}/{name}", s.handlers.GetMetricValue)
 	r.Get("/", s.handlers.GetAllMetricsHTML)
 	r.Get("/ping", s.handlers.PingDB)
@@ -295,5 +389,36 @@ func (s *Server) wrapWithSyncSmart(handler http.HandlerFunc) http.HandlerFunc {
 		if recorder.statusCode >= 200 && recorder.statusCode < 300 {
 			s.SaveOnUpdate()
 		}
+	}
+}
+
+// wrapWithTrustedSubnetCheck добавляет проверку X-Real-IP против доверенной подсети.
+// Если доверенная подсеть не настроена, запросы пропускаются без ограничений.
+func (s *Server) wrapWithTrustedSubnetCheck(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// Если trusted subnet не настроена — пропускаем без проверок
+		if s.trustedCIDR == nil {
+			next(w, r)
+			return
+		}
+
+		ipStr := r.Header.Get("X-Real-IP")
+		if ipStr == "" {
+			http.Error(w, "missing X-Real-IP header", http.StatusForbidden)
+			return
+		}
+
+		ip := net.ParseIP(ipStr)
+		if ip == nil {
+			http.Error(w, "invalid X-Real-IP header", http.StatusForbidden)
+			return
+		}
+
+		if !s.trustedCIDR.Contains(ip) {
+			http.Error(w, "forbidden: IP not in trusted subnet", http.StatusForbidden)
+			return
+		}
+
+		next(w, r)
 	}
 }
