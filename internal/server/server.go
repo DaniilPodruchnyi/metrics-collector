@@ -11,8 +11,8 @@ import (
 	"github.com/DaniilPodruchnyi/metrics-collector/internal/config"
 	"github.com/DaniilPodruchnyi/metrics-collector/internal/config/db"
 	"github.com/DaniilPodruchnyi/metrics-collector/internal/handler"
-	"github.com/DaniilPodruchnyi/metrics-collector/internal/model"
 	custommiddleware "github.com/DaniilPodruchnyi/metrics-collector/internal/middleware"
+	"github.com/DaniilPodruchnyi/metrics-collector/internal/model"
 	metrics "github.com/DaniilPodruchnyi/metrics-collector/internal/proto"
 	"github.com/DaniilPodruchnyi/metrics-collector/internal/repository"
 	"github.com/DaniilPodruchnyi/metrics-collector/internal/security"
@@ -29,19 +29,21 @@ import (
 
 // Server инкапсулирует HTTP-сервер, хранилище и обработчики метрик.
 type Server struct {
-	address      string
-	config       *config.ServerConfig
-	service      *service.MetricService
-	handlers     *handler.MetricHandler
-	fileStorage  storage.PersistentStorage
-	repository   repository.MetricRepository
-	httpServer   *http.Server
-	cancelFunc   context.CancelFunc
-	dbPool       *pgxpool.Pool
-	storageType  string // "postgres", "file", или "memory"
-	privateKey   *rsa.PrivateKey
-	trustedCIDR  *net.IPNet
-	grpcServer   *grpc.Server
+	metrics.UnimplementedMetricsServer
+
+	address     string
+	config      *config.ServerConfig
+	service     *service.MetricService
+	handlers    *handler.MetricHandler
+	fileStorage storage.PersistentStorage
+	repository  repository.MetricRepository
+	httpServer  *http.Server
+	cancelFunc  context.CancelFunc
+	dbPool      *pgxpool.Pool
+	storageType string // "postgres", "file", или "memory"
+	privateKey  *rsa.PrivateKey
+	trustedCIDR *net.IPNet
+	grpcServer  *grpc.Server
 }
 
 // New создает новый сервер метрик на основе конфигурации.
@@ -162,20 +164,23 @@ func (s *Server) UpdateMetrics(ctx context.Context, req *metrics.UpdateMetricsRe
 			value *float64
 		)
 
-		switch m.Type {
-		case metrics.MetricCOUNTER:
+		switch m.GetType() {
+		case metrics.Metric_COUNTER:
 			mType = model.Counter
-			d := m.Delta
+			d := m.GetDelta()
 			delta = &d
-		default:
-			// По умолчанию считаем GAUGE.
+		case metrics.Metric_GAUGE:
 			mType = model.Gauge
-			v := m.Value
+			v := m.GetValue()
 			value = &v
+		default:
+			log.Printf("skipping metric %q: unknown gRPC metric type %v (%d)",
+				m.GetId(), m.GetType(), int32(m.GetType()))
+			continue
 		}
 
 		batch = append(batch, model.Metrics{
-			ID:    m.ID,
+			ID:    m.GetId(),
 			MType: mType,
 			Delta: delta,
 			Value: value,

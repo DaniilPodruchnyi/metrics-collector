@@ -117,7 +117,6 @@ func New(cfg *config.AgentConfig) *Agent {
 		conn, err := grpc.NewClient(
 			cfg.GRPCAddress,
 			grpc.WithTransportCredentials(insecure.NewCredentials()),
-			grpc.WithDefaultCallOptions(grpc.ForceCodec(metrics.JSONCodec)),
 		)
 		if err != nil {
 			log.Printf("Failed to create gRPC client for %s: %v. Falling back to HTTP transport.", cfg.GRPCAddress, err)
@@ -307,15 +306,27 @@ func (a *Agent) sendMetricsBatchGRPC(ctx context.Context) error {
 
 	for _, m := range metricsCopy {
 		pm := &metrics.Metric{
-			ID: m.ID,
+			Id: m.ID,
 		}
 
-		if m.MType == model.Counter && m.Delta != nil {
-			pm.Type = metrics.MetricCOUNTER
+		switch m.MType {
+		case model.Counter:
+			if m.Delta == nil {
+				log.Printf("skipping counter metric %q: delta is nil", m.ID)
+				continue
+			}
+			pm.Type = metrics.Metric_COUNTER
 			pm.Delta = *m.Delta
-		} else if m.MType == model.Gauge && m.Value != nil {
-			pm.Type = metrics.MetricGAUGE
+		case model.Gauge:
+			if m.Value == nil {
+				log.Printf("skipping gauge metric %q: value is nil", m.ID)
+				continue
+			}
+			pm.Type = metrics.Metric_GAUGE
 			pm.Value = *m.Value
+		default:
+			log.Printf("skipping metric %q: unknown model type %q", m.ID, m.MType)
+			continue
 		}
 
 		req.Metrics = append(req.Metrics, pm)
